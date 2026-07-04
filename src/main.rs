@@ -8,9 +8,25 @@ mod optimizer;
 mod output_compress;
 mod proxy;
 mod stats;
+mod gain;
 
 fn main() {
-    let args: Vec<String> = env::args().skip(1).collect();
+    let raw_args: Vec<String> = env::args().skip(1).collect();
+
+    if raw_args.is_empty() {
+        print_help();
+        return;
+    }
+
+    // Parse global flags
+    let mut ultra = false;
+    let mut args = Vec::new();
+    for a in &raw_args {
+        match a.as_str() {
+            "-u" | "--ultra-compact" => ultra = true,
+            _ => args.push(a.clone()),
+        }
+    }
 
     if args.is_empty() {
         print_help();
@@ -23,7 +39,7 @@ fn main() {
                 eprintln!("Usage: tp run <command> [args...]");
                 std::process::exit(1);
             }
-            run_command(&args[1..]);
+            run_command(&args[1..], ultra);
         }
         "proxy" => {
             let port = parse_flag(&args, "--port").unwrap_or_else(|| "8080".to_string());
@@ -46,6 +62,7 @@ fn main() {
             }
         }
         "stats" => stats::show_stats(),
+        "gain" => gain::show_gain(),
         "cache" => {
             if args.get(1).map(|s| s.as_str()) == Some("clear") {
                 optimizer::clear_disk_cache();
@@ -56,11 +73,11 @@ fn main() {
         }
         "--help" | "-h" | "help" => print_help(),
         "--version" | "-V" => println!("tp (token-pipeline) v0.1.0"),
-        _ => run_command(&args),
+        _ => run_command(&args, ultra),
     }
 }
 
-fn run_command(args: &[String]) {
+fn run_command(args: &[String], ultra: bool) {
     let start = Instant::now();
     let (cmd, cmd_args) = (args[0].as_str(), &args[1..]);
     let full_cmd = args.join(" ");
@@ -73,7 +90,7 @@ fn run_command(args: &[String]) {
             let stderr = String::from_utf8_lossy(&out.stderr).to_string();
             let raw = format!("{}{}", stdout, stderr);
 
-            let filtered = input_filter::apply(&full_cmd, &stdout, &stderr, out.status.code().unwrap_or(-1));
+            let filtered = input_filter::apply_with_ultra(&full_cmd, &stdout, &stderr, out.status.code().unwrap_or(-1), ultra);
 
             print!("{}", filtered);
 
@@ -122,12 +139,16 @@ tp (token-pipeline) v0.1.0
 Full pipeline: RTK filter → KatGPT-RS optimize → Caveman compress
 
 USAGE:
-  tp run <command> [args...]     Run command with output compression
-  tp proxy [options]             Start OpenAI-compatible optimization proxy
-  tp shrink [MODE]               Compress stdin text (lite|full|ultra)
-  tp stats                       Show token savings statistics
-  tp cache clear                 Clear response cache
-  tp help                        Show this help
+  tp [FLAGS] run <command> [args...]     Run command with output compression
+  tp proxy [options]                     Start OpenAI-compatible optimization proxy
+  tp shrink [MODE]                       Compress stdin text (lite|full|ultra)
+  tp stats                               Show token savings statistics
+  tp gain                                Detailed token savings analytics
+  tp cache [clear]                       Show/clear response cache
+  tp help                                Show this help
+
+FLAGS:
+  -u, --ultra-compact    Maximum compression (extension counts, telegraphic format)
 
 PROXY OPTIONS:
   --port PORT        Listen port (default: 8080)
@@ -139,14 +160,13 @@ EXAMPLES:
   tp run git diff                Changed lines only
   tp run cargo test              Failures summary
   tp run ls -la                  Compact listing
+  tp -u run ls -la               Ultra-compact (file counts by extension)
 
   tp proxy --port 8080           Start proxy server
   echo "verbose text" | tp shrink   Compress any text
 
-  # Point your IDE/CLI to the proxy:
-  # Claude:    ANTHROPIC_BASE_URL=http://localhost:8080
-  # Cursor:    Set "openai.baseUrl" to http://localhost:8080
-  # Codex:     OPENAI_BASE_URL=http://localhost:8080/v1
+GLOBAL FLAGS:
+  -u, --ultra-compact    Extra compression on ls, git status, etc.
 
 PIPELINE STAGES:
   1. Input   — RTK-style command output filtering (remove noise)

@@ -9,6 +9,10 @@
 use std::collections::HashMap;
 
 pub fn apply(cmd: &str, stdout: &str, stderr: &str, exit_code: i32) -> String {
+    apply_with_ultra(cmd, stdout, stderr, exit_code, false)
+}
+
+pub fn apply_with_ultra(cmd: &str, stdout: &str, stderr: &str, exit_code: i32, ultra: bool) -> String {
     let parts: Vec<&str> = cmd.split_whitespace().collect();
     if parts.is_empty() {
         return format!("{}{}", stdout, stderr);
@@ -16,8 +20,10 @@ pub fn apply(cmd: &str, stdout: &str, stderr: &str, exit_code: i32) -> String {
 
     match parts[0] {
         "git" => apply_git(parts.get(1).copied().unwrap_or(""), stdout, stderr, exit_code),
-        "ls" | "dir" | "exa" | "eza" => ls_compact(stdout),
-        "cat" | "bat" | "head" | "tail" | "less" | "more" => smart_read(stdout, parts.get(1).copied()),
+        "ls" | "dir" | "exa" | "eza" => ls_compact(stdout, ultra),
+        "cat" | "bat" | "head" | "tail" | "less" | "more" => {
+            smart_read(stdout, parts.get(1).copied())
+        }
         "cargo" => apply_cargo(parts.get(1).copied().unwrap_or(""), stdout, stderr),
         "npm" | "pnpm" | "yarn" | "bun" => apply_js_runner(&parts, stdout, stderr),
         "pytest" | "jest" | "vitest" | "rspec" | "go" => test_compact(stdout, stderr),
@@ -376,7 +382,7 @@ fn git_action(sub: &str, stdout: &str, stderr: &str, exit_code: i32) -> String {
 
 // ─── File/Directory Filters ──────────────────────────────────────
 
-fn ls_compact(stdout: &str) -> String {
+fn ls_compact(stdout: &str, ultra: bool) -> String {
     let mut dirs = Vec::new();
     let mut files = Vec::new();
 
@@ -402,40 +408,49 @@ fn ls_compact(stdout: &str) -> String {
         return stdout.to_string();
     }
 
-    let mut result = format!("{} dirs, {} files\n", dirs.len(), files.len());
-    for d in &dirs {
-        result.push_str(&format!("  {}/\n", d));
+    if ultra {
+        // Ultra-compact: just show counts per extension
+        let mut ext_counts: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+        let mut count_other = 0u32;
+        for f in &files {
+            let ext = f.rsplit('.').nth(1).map(|e| e.to_lowercase()).unwrap_or_else(|| "(no ext)".to_string());
+            if f.contains('.') {
+                *ext_counts.entry(ext).or_insert(0) += 1;
+            } else {
+                count_other += 1;
+            }
+        }
+        let mut result = format!("{} dirs, {} files\n", dirs.len(), files.len());
+        for (ext, count) in &ext_counts {
+            result.push_str(&format!("  .{}: {} files\n", ext, count));
+        }
+        if count_other > 0 {
+            result.push_str(&format!("  other: {} files\n", count_other));
+        }
+        result
+    } else {
+        let mut result = format!("{} dirs, {} files\n", dirs.len(), files.len());
+        for d in &dirs {
+            result.push_str(&format!("  {}/\n", d));
+        }
+        for f in &files {
+            result.push_str(&format!("  {}\n", f));
+        }
+        result
     }
-    for f in &files {
-        result.push_str(&format!("  {}\n", f));
-    }
-    result
 }
 
 fn smart_read(stdout: &str, filename: Option<&str>) -> String {
     let lines: Vec<&str> = stdout.lines().collect();
-    if lines.len() <= 80 {
-        return stdout.to_string();
-    }
+    let name = filename.unwrap_or("file");
 
+    // Always show compact signature summary, even for small files
     let mut result = Vec::new();
-    let ext = filename.and_then(|f| f.rsplit('.').next()).unwrap_or("");
-    result.push(format!(
-        "# {} ({} lines, key parts shown)",
-        filename.unwrap_or("file"),
-        lines.len()
-    ));
+    result.push(format!("# {} ({} lines, key signatures)", name, lines.len()));
 
-    let mut consecutive_blank = 0;
+    let mut key_lines: Vec<(usize, &str)> = Vec::new();
+
     for (i, line) in lines.iter().enumerate() {
-        if line.trim().is_empty() {
-            consecutive_blank += 1;
-            if consecutive_blank <= 1 {
-                result.push(String::new());
-            }
-            continue;
-        }
-        consecutive_blank = 0;
 
         let t = line.trim();
         let is_key = t.starts_with("pub ")
@@ -449,7 +464,6 @@ fn smart_read(stdout: &str, filename: Option<&str>) -> String {
             || t.starts_with("type ")
             || t.starts_with("class ")
             || t.starts_with("def ")
-            || t.starts_with("async def ")
             || t.starts_with("function ")
             || t.starts_with("export ")
             || t.starts_with("import ")
@@ -463,18 +477,37 @@ fn smart_read(stdout: &str, filename: Option<&str>) -> String {
             || t.starts_with("///")
             || t.starts_with("//!")
             || t.starts_with("# ")
-            || t.starts_with("## ")
-            || i < 10
-            || i >= lines.len() - 5;
-
-        let _ = ext;
+            || t.starts_with("## ");
 
         if is_key {
-            result.push(format!("{:4}| {}", i + 1, line));
+            key_lines.push((i + 1, line));
         }
     }
 
-    result.push(format!("# total {} lines", lines.len()));
+    if key_lines.is_empty() {
+        // No key lines found — show first/last 10 lines
+        if lines.len() <= 20 {
+            result.extend(lines.iter().enumerate().map(|(i, l)| format!("{:4}| {}", i + 1, l)));
+        } else {
+            for i in 0..10 {
+                result.push(format!("{:4}| {}", i + 1, lines[i]));
+            }
+            result.push("  ...".to_string());
+            for i in lines.len().saturating_sub(5)..lines.len() {
+                result.push(format!("{:4}| {}", i + 1, lines[i]));
+            }
+        }
+    } else {
+        // Show key lines with "... N more" if file is large
+        let max_keys = if lines.len() > 80 { 30 } else { 999 };
+        for (i, (lineno, line)) in key_lines.iter().enumerate().take(max_keys) {
+            result.push(format!("{:4}| {}", lineno, line));
+        }
+        if key_lines.len() > max_keys {
+            result.push(format!("  ... +{} key lines omitted", key_lines.len() - max_keys));
+        }
+    }
+
     result.join("\n") + "\n"
 }
 
