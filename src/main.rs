@@ -9,6 +9,8 @@ mod output_compress;
 mod proxy;
 mod stats;
 mod gain;
+mod hook;
+mod discover;
 
 fn main() {
     let raw_args: Vec<String> = env::args().skip(1).collect();
@@ -71,6 +73,11 @@ fn main() {
                 optimizer::show_cache_info();
             }
         }
+        "init" => {
+            let target = args.get(1).map(|s| s.as_str()).unwrap_or("bash");
+            hook::install_hook(target);
+        }
+        "discover" => discover::show_discover(),
         "--help" | "-h" | "help" => print_help(),
         "--version" | "-V" => println!("tp (token-pipeline) v0.1.0"),
         _ => run_command(&args, ultra),
@@ -144,7 +151,9 @@ USAGE:
   tp shrink [MODE]                       Compress stdin text (lite|full|ultra)
   tp stats                               Show token savings statistics
   tp gain                                Detailed token savings analytics
+  tp discover                            Find missed savings opportunities
   tp cache [clear]                       Show/clear response cache
+  tp init [target]                       Install auto-hooks (bash|hermes)
   tp help                                Show this help
 
 FLAGS:

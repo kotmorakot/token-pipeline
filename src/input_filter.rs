@@ -29,13 +29,16 @@ pub fn apply_with_ultra(cmd: &str, stdout: &str, stderr: &str, exit_code: i32, u
         "pytest" | "jest" | "vitest" | "rspec" | "go" => test_compact(stdout, stderr),
         "grep" | "rg" | "ag" => grep_compact(stdout),
         "find" | "fd" => find_compact(stdout),
-        "docker" | "podman" => apply_docker(parts.get(1).copied().unwrap_or(""), stdout, stderr),
-        "kubectl" | "oc" | "helm" => dedup_lines(stdout),
+        "docker" | "podman" => apply_docker(parts.get(1).copied().unwrap_or(""), stdout, stderr, ultra),
+        "kubectl" | "oc" | "helm" => apply_kubectl(parts.get(1).copied().unwrap_or(""), stdout, stderr),
+        "gh" => apply_gh(parts.get(1).copied().unwrap_or(""), stdout, stderr),
         "env" | "printenv" => env_compact(stdout),
         "curl" | "wget" | "httpie" => truncate(stdout, 2000),
         "tree" => tree_compact(stdout),
         "ps" => ps_compact(stdout),
         "df" => df_compact(stdout),
+        "pip" | "pip3" | "uv" => apply_pip(parts.get(1).copied().unwrap_or(""), stdout),
+        "tsc" | "npx" | "next" => build_compact(stdout, stderr),
         "make" | "cmake" | "ninja" => build_compact(stdout, stderr),
         "python" | "python3" | "node" | "ruby" | "php" => {
             if exit_code != 0 {
@@ -88,13 +91,84 @@ fn apply_js_runner(parts: &[&str], stdout: &str, stderr: &str) -> String {
     }
 }
 
-fn apply_docker(sub: &str, stdout: &str, stderr: &str) -> String {
+fn apply_docker(sub: &str, stdout: &str, stderr: &str, ultra: bool) -> String {
     match sub {
         "ps" => docker_ps(stdout),
         "images" => docker_images(stdout),
         "logs" => dedup_lines(stdout),
+        "compose" => docker_compose_ps(stdout),
         "build" => build_compact(stdout, stderr),
         _ => format!("{}{}", stdout, stderr),
+    }
+}
+
+fn apply_kubectl(sub: &str, stdout: &str, stderr: &str) -> String {
+    match sub {
+        "get" => {
+            let obj_type = stdout.lines().next().unwrap_or("");
+            let count = stdout.lines().count().saturating_sub(1);
+            if count <= 1 {
+                format!("{}", stdout)
+            } else {
+                format!("{} ({} items)\n", stdout.lines().next().unwrap_or(""), count)
+            }
+        }
+        "logs" => dedup_lines(stdout),
+        _ => format!("{}{}", stdout, stderr),
+    }
+}
+
+fn apply_gh(sub: &str, stdout: &str, stderr: &str) -> String {
+    match sub {
+        "pr" => {
+            let lines: Vec<&str> = stdout.lines().collect();
+            if lines.len() <= 15 {
+                return stdout.to_string();
+            }
+            let mut result = format!("{} PRs:\n", lines.len());
+            for line in lines.iter().take(10) {
+                result.push_str(&format!("  {}\n", line));
+            }
+            if lines.len() > 10 {
+                result.push_str(&format!("  ... +{} more\n", lines.len() - 10));
+            }
+            result
+        }
+        "issue" => {
+            let lines: Vec<&str> = stdout.lines().collect();
+            if lines.len() <= 15 {
+                return stdout.to_string();
+            }
+            format!("{} issues (showing first 10)\n{}\n...\n", lines.len(), lines[..10.min(lines.len())].join("\n"))
+        }
+        "run" => {
+            let lines: Vec<&str> = stdout.lines().collect();
+            if lines.len() <= 15 {
+                return stdout.to_string();
+            }
+            format!("{} workflow runs (showing first 10)\n{}\n...\n", lines.len(), lines[..10.min(lines.len())].join("\n"))
+        }
+        _ => format!("{}{}", stdout, stderr),
+    }
+}
+
+fn apply_pip(sub: &str, stdout: &str) -> String {
+    match sub {
+        "list" => {
+            let lines: Vec<&str> = stdout.lines().collect();
+            if lines.len() <= 5 {
+                return stdout.to_string();
+            }
+            format!("{} packages (use `pip list` for details)\n", lines.len() - 2) // minus header
+        }
+        "freeze" => {
+            let lines: Vec<&str> = stdout.lines().collect();
+            if lines.len() <= 20 {
+                return stdout.to_string();
+            }
+            format!("{} packages\n", lines.len())
+        }
+        _ => stdout.to_string(),
     }
 }
 
@@ -745,6 +819,14 @@ fn docker_images(stdout: &str) -> String {
         }
     }
     result
+}
+
+fn docker_compose_ps(stdout: &str) -> String {
+    let lines: Vec<&str> = stdout.lines().collect();
+    if lines.len() <= 1 {
+        return "no services\n".to_string();
+    }
+    format!("{} services:\n{}\n", lines.len() - 1, lines[..lines.len().min(5)].join("\n"))
 }
 
 fn ps_compact(stdout: &str) -> String {
