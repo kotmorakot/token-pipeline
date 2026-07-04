@@ -53,7 +53,15 @@ fn main() {
         "shrink" => {
             let mut input = String::new();
             io::stdin().read_to_string(&mut input).unwrap_or_default();
-            let mode = if args.len() > 1 { &args[1] } else { "full" };
+            let mode = if args.len() > 1 {
+                let m = &args[1];
+                if m == "lite" || m == "full" || m == "ultra" { m.as_str() } else { "full" }
+            } else {
+                // Auto-detect mode based on content length
+                if input.len() > 5000 { "ultra" }
+                else if input.len() > 1000 { "full" }
+                else { "lite" }
+            };
             let result = output_compress::compress_text(&input, mode);
             print!("{}", result);
             let raw_len = input.len();

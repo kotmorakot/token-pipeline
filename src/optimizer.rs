@@ -147,12 +147,17 @@ fn extract_json_from_response(text: &str) -> String {
 // ─── Prompt Compression ─────────────────────────────────────────
 
 pub fn compress_prompt(content: &str) -> String {
-    if content.len() < 100 {
+    compress_prompt_level(content, "full")
+}
+
+pub fn compress_prompt_level(content: &str, mode: &str) -> String {
+    if content.len() < 80 {
         return content.to_string();
     }
 
     let mut result = content.to_string();
 
+    // Common across all modes
     let removable_phrases = [
         "I would like you to please ",
         "Could you please ",
@@ -180,6 +185,28 @@ pub fn compress_prompt(content: &str) -> String {
 
     for phrase in &removable_phrases {
         result = result.replace(phrase, "");
+    }
+
+    // Mode-specific compression
+    match mode {
+        "ultra" => {
+            // Ultra: also remove filler adverbs, hedging, meta-commentary
+            let ultra_phrases = [
+                "basically ", "actually ", "essentially ", "literally ",
+                "honestly ", "frankly ", "just ", "simply ",
+                "I think ", "I believe ", "I'd say ",
+                "In my opinion, ", "From my perspective, ",
+                "It is worth noting that ", "It is worth mentioning that ",
+                "Let me preface this by saying ",
+                "Before we begin, ",
+                "First and foremost, ",
+            ];
+            for p in &ultra_phrases {
+                result = result.replace(p, "");
+            }
+            result = result.replace("  ", " ");
+        }
+        _ => {} // "lite" and "full" just do basics
     }
 
     result = result.replace("  ", " ");
