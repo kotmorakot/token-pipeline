@@ -97,7 +97,19 @@ fn run_command(args: &[String], ultra: bool) {
     let (cmd, cmd_args) = (args[0].as_str(), &args[1..]);
     let full_cmd = args.join(" ");
 
-    let output = Command::new(cmd).args(cmd_args).output();
+    let mut command = Command::new(cmd);
+    command.args(cmd_args);
+
+    // Strip tp-hooks from PATH to avoid wrapper recursion
+    if let Ok(path) = std::env::var("PATH") {
+        let clean_path: Vec<&str> = path
+            .split(':')
+            .filter(|p| !p.contains("tp-hooks") && !p.contains("token-pipeline"))
+            .collect();
+        command.env("PATH", clean_path.join(":"));
+    }
+
+    let output = command.output();
 
     match output {
         Ok(out) => {

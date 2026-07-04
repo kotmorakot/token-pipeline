@@ -1,81 +1,175 @@
 /// `tp init` — Install auto-hooks for AI tools
 ///
-/// Installs a bash hook that automatically rewrites commands
+/// Installs wrapper scripts that automatically rewrite commands
 /// (e.g., `git status` → `tp run git status`)
+///
+/// Approach: Creates tiny wrapper scripts in ~/.local/bin/tp-hooks/
+/// and adds that directory to PATH. This is more reliable than
+/// DEBUG trap because:
+///   - Works in interactive AND non-interactive shells
+///   - Preserves pipes, redirects, exit codes
+///   - No trap hijacking
+///   - Each command explicitly wrapped
 
 use std::fs;
+use std::io::Write;
 use std::path::PathBuf;
+
+/// Commands that tp can intercept
+const TP_COMMANDS: &[&str] = &[
+    "git", "ls", "cat", "bat", "head", "tail", "less", "more",
+    "cargo", "npm", "pnpm", "yarn", "bun",
+    "pytest", "jest", "vitest", "rspec",
+    "grep", "rg", "ag", "find", "fd",
+    "docker", "podman", "kubectl", "oc", "helm",
+    "env", "printenv", "curl", "wget", "httpie",
+    "tree", "ps", "df",
+    "make", "cmake", "ninja",
+    "python", "python3", "node", "ruby", "php",
+    "gh", "pip", "pip3", "uv", "tsc", "npx", "next",
+];
 
 pub fn install_hook(target: &str) {
     match target {
-        "bash" | "" => install_bash(),
+        "bash" | "" => install_bash_wrappers(),
         "hermes" => install_hermes(),
+        u if u.starts_with("add:") => add_single_wrapper(&u[4..]),
         _ => {
-            eprintln!("Unknown target: {}. Use: bash, hermes", target);
+            eprintln!("Unknown target: {}. Use: bash, hermes, add:<cmd>", target);
             std::process::exit(1);
         }
     }
 }
 
-fn hook_dir() -> PathBuf {
+fn hooks_dir() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    PathBuf::from(&home).join(".local/share/token-pipeline")
+    PathBuf::from(&home).join(".local/bin/tp-hooks")
 }
 
-fn install_bash() {
-    let dir = hook_dir();
+fn install_bash_wrappers() {
+    let dir = hooks_dir();
     fs::create_dir_all(&dir).ok();
 
-    // Copy hook script
-    let hook_src = include_str!("../scripts/hook.sh");
-    let hook_dst = dir.join("hook.sh");
-    fs::write(&hook_dst, hook_src).ok();
+    let mut count = 0u32;
+    for cmd in TP_COMMANDS {
+        let wrapper_path = dir.join(cmd);
+        let wrapper_content = format!(
+            r#"#!/bin/bash
+# tp wrapper for {cmd}
+exec tp run {cmd} "$@"
+"#,
+            cmd = cmd
+        );
 
-    println!("Hook installed to: {}", hook_dst.display());
+        if let Err(e) = fs::write(&wrapper_path, &wrapper_content) {
+            eprintln!("  ⚠️  Failed to create wrapper for '{}': {}", cmd, e);
+            continue;
+        }
 
-    // Check if already in bashrc
+        // Make executable
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&wrapper_path, fs::Permissions::from_mode(0o755)).ok();
+        count += 1;
+    }
+
+    println!("  ✓ Created {} wrapper scripts in {}", count, dir.display());
+    println!();
+
+    // Add to PATH in bashrc
     let bashrc_path = PathBuf::from(
         std::env::var("HOME").unwrap_or_else(|_| ".".to_string()),
     ).join(".bashrc");
 
+    let path_line = format!("\n# tp hooks (higher priority in PATH)\nexport PATH=\"$HOME/.local/bin/tp-hooks:$PATH\"\n");
+
     let bashrc = fs::read_to_string(&bashrc_path).unwrap_or_default();
-    if bashrc.contains("token-pipeline/hook.sh") {
-        println!("  ✓ Already sourced in ~/.bashrc");
+    if bashrc.contains("tp-hooks") {
+        println!("  ✓ tp-hooks already in ~/.bashrc PATH");
     } else {
-        let line = format!("\n# Token Pipeline hook\nsource ~/.local/share/token-pipeline/hook.sh\n");
-        fs::OpenOptions::new()
+        let mut file = fs::OpenOptions::new()
             .append(true)
             .create(true)
             .open(&bashrc_path)
-            .ok()
-            .map(|mut f| { use std::io::Write; f.write_all(line.as_bytes()).ok() });
-        println!("  ✓ Added to ~/.bashrc");
+            .unwrap();
+        file.write_all(path_line.as_bytes()).ok();
+        println!("  ✓ Added tp-hooks to PATH in ~/.bashrc");
     }
 
     println!();
-    println!("✅ Auto-hooks installed!");
-    println!("   Commands like `git status`, `ls -la`, `cargo test` will");
-    println!("   automatically run through tp for token optimization.");
+    println!("  ╔═══════════════════════════════════════════════╗");
+    println!("  ║  tp auto-hooks installed!                    ║");
+    println!("  ║                                              ║");
+    println!("  ║  Now `git status` → auto → `tp run git`     ║");
+    println!("  ║  Now `ls -la`     → auto → `tp run ls`      ║");
+    println!("  ║  Now `cargo test` → auto → `tp run cargo`   ║");
+    println!("  ╚═══════════════════════════════════════════════╝");
     println!();
-    println!("   To uninstall: remove the source line from ~/.bashrc");
-    println!("   To bypass: use \\command (e.g. \\git status)");
+    println!("  {} commands are now auto-rewritten via tp!", count);
+    println!();
+    println!("  To bypass: use full path (/usr/bin/git status)");
+    println!("  To uninstall: remove tp-hooks from PATH in ~/.bashrc");
+    println!("  To add more commands: tp init add:<command>");
+    println!();
+}
+
+fn add_single_wrapper(cmd: &str) {
+    let dir = hooks_dir();
+    fs::create_dir_all(&dir).ok();
+
+    let cmd = cmd.trim();
+    if cmd.is_empty() {
+        eprintln!("Usage: tp init add:<command>");
+        return;
+    }
+
+    let wrapper_path = dir.join(cmd);
+    let wrapper_content = format!(
+        r#"#!/bin/bash
+# tp wrapper for {cmd}
+exec tp run {cmd} "$@"
+"#,
+        cmd = cmd
+    );
+
+    fs::write(&wrapper_path, &wrapper_content).ok();
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(&wrapper_path, fs::Permissions::from_mode(0o755)).ok();
+
+    println!("  ✓ Added wrapper for '{}'", cmd);
+    println!("  Location: {}", wrapper_path.display());
 }
 
 fn install_hermes() {
     println!("Installing Hermes Agent integration...");
 
-    // Add to vault CLAUDE.md if it exists
+    // Add to vault CLAUDE.md
     let vault_paths = [
-        PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".to_string())).join("vault/CLAUDE.md"),
-        PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".to_string())).join("vault/06-SYSTEM/CLAUDE.md"),
+        PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".to_string()))
+            .join("vault/CLAUDE.md"),
+        PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".to_string()))
+            .join("vault/06-SYSTEM/CLAUDE.md"),
     ];
 
-    let tp_rule = "\n## Token Pipeline\n\nUse `tp run <command>` instead of plain shell commands to save 40-87% tokens.\n\n```bash\ntp run git status\ntp run ls -la\ntp run cargo test\n```\n";
+    let tp_rule = format!(
+        r#"
+## tp Hooks (Auto-rewrite)
+
+Wrapper scripts installed at `~/.local/bin/tp-hooks/` auto-rewrite these commands through `tp run`:
+
+```bash
+{}
+```
+
+To add more: `tp init add:<command>`
+To bypass: use full path (`/usr/bin/git status`)
+"#,
+        TP_COMMANDS.iter().map(|c| format!("  {} → tp run {}", c, c)).collect::<Vec<_>>().join("\n")
+    );
 
     for path in &vault_paths {
         if path.exists() {
             let content = fs::read_to_string(path).unwrap_or_default();
-            if content.contains("Token Pipeline") || content.contains("tp run") {
+            if content.contains("tp Hooks") || content.contains("Auto-rewrite") {
                 println!("  ✓ Already in {}", path.display());
             } else {
                 fs::write(path, format!("{}\n{}", content.trim(), tp_rule)).ok();
@@ -84,6 +178,9 @@ fn install_hermes() {
         }
     }
 
+    // Also install the bash wrappers
+    install_bash_wrappers();
+
     println!("✅ Hermes integration complete!");
-    println!("   Hermes will now use tp automatically for shell commands.");
+    println!("   Hermes will now auto-rewrite commands through tp.");
 }
