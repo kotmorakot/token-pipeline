@@ -1,15 +1,9 @@
-/// Stage 2: Optimization — KatGPT-RS-inspired caching and validation
-///
-/// BLAKE3-based response caching: identical prompts get cached results instantly.
-/// Constraint validation: check structured output without re-calling LLM.
-
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
-
-// ─── BLAKE3 Response Cache ───────────────────────────────────────
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct CachedResponse {
@@ -22,17 +16,28 @@ pub struct CachedResponse {
 
 pub struct ResponseCache {
     entries: HashMap<String, CachedResponse>,
+    access_order: Vec<String>,
     pub hits: u64,
     pub misses: u64,
+    ttl_secs: u64,
+    max_entries: usize,
 }
 
 impl ResponseCache {
     pub fn new() -> Self {
+        Self::with_limits(3600, 1000)
+    }
+
+    pub fn with_limits(ttl_secs: u64, max_entries: usize) -> Self {
         let entries = load_cache_from_disk();
+        let access_order: Vec<String> = entries.keys().cloned().collect();
         Self {
             entries,
+            access_order,
             hits: 0,
             misses: 0,
+            ttl_secs,
+            max_entries,
         }
     }
 
@@ -42,8 +47,16 @@ impl ResponseCache {
     }
 
     pub fn get(&mut self, key: &str) -> Option<&CachedResponse> {
-        if self.entries.contains_key(key) {
+        if let Some(entry) = self.entries.get(key) {
+            let now = now_secs();
+            if self.ttl_secs > 0 && now.saturating_sub(entry.timestamp) > self.ttl_secs {
+                self.entries.remove(key);
+                self.access_order.retain(|k| k != key);
+                self.misses += 1;
+                return None;
+            }
             self.hits += 1;
+            self.touch(key);
             self.entries.get(key)
         } else {
             self.misses += 1;
@@ -52,95 +65,29 @@ impl ResponseCache {
     }
 
     pub fn put(&mut self, key: String, response: CachedResponse) {
+        if self.entries.len() >= self.max_entries {
+            self.evict_oldest();
+        }
+        save_entry_to_disk(&key, &response);
         self.entries.insert(key.clone(), response);
-        save_entry_to_disk(&key, &self.entries[&key]);
+        self.touch(&key);
     }
 
     pub fn stats(&self) -> (u64, u64, usize) {
         (self.hits, self.misses, self.entries.len())
     }
-}
 
-// ─── Constraint Validator ────────────────────────────────────────
-
-pub struct ConstraintValidator;
-
-impl ConstraintValidator {
-    pub fn validate_json(text: &str) -> ValidationResult {
-        let clean = extract_json_from_response(text);
-        match serde_json::from_str::<serde_json::Value>(&clean) {
-            Ok(val) => ValidationResult::Valid(serde_json::to_string(&val).unwrap_or_default()),
-            Err(e) => ValidationResult::Invalid(e.to_string()),
-        }
+    fn touch(&mut self, key: &str) {
+        self.access_order.retain(|k| k != key);
+        self.access_order.push(key.to_string());
     }
 
-    pub fn validate_code_block(text: &str) -> ValidationResult {
-        if text.contains("```") {
-            let blocks: Vec<&str> = text.split("```").collect();
-            if blocks.len() % 2 == 1 {
-                ValidationResult::Valid(text.to_string())
-            } else {
-                ValidationResult::Invalid("Unclosed code block".to_string())
-            }
-        } else {
-            ValidationResult::Valid(text.to_string())
+    fn evict_oldest(&mut self) {
+        if let Some(oldest_key) = self.access_order.first().cloned() {
+            self.entries.remove(&oldest_key);
+            self.access_order.remove(0);
+            remove_entry_from_disk(&oldest_key);
         }
-    }
-
-    pub fn try_fix_json(text: &str) -> Option<String> {
-        let clean = extract_json_from_response(text);
-
-        if let Ok(val) = serde_json::from_str::<serde_json::Value>(&clean) {
-            return Some(serde_json::to_string_pretty(&val).unwrap_or_default());
-        }
-
-        if let Some(start) = clean.find('{') {
-            if let Some(end) = clean.rfind('}') {
-                let slice = &clean[start..=end];
-                if let Ok(val) = serde_json::from_str::<serde_json::Value>(slice) {
-                    return Some(serde_json::to_string_pretty(&val).unwrap_or_default());
-                }
-            }
-        }
-
-        if let Some(start) = clean.find('[') {
-            if let Some(end) = clean.rfind(']') {
-                let slice = &clean[start..=end];
-                if let Ok(val) = serde_json::from_str::<serde_json::Value>(slice) {
-                    return Some(serde_json::to_string_pretty(&val).unwrap_or_default());
-                }
-            }
-        }
-
-        None
-    }
-}
-
-pub enum ValidationResult {
-    Valid(String),
-    Invalid(String),
-}
-
-fn extract_json_from_response(text: &str) -> String {
-    let trimmed = text.trim();
-    if trimmed.starts_with("```json") {
-        trimmed
-            .strip_prefix("```json")
-            .unwrap_or(trimmed)
-            .strip_suffix("```")
-            .unwrap_or(trimmed)
-            .trim()
-            .to_string()
-    } else if trimmed.starts_with("```") && (trimmed.contains('{') || trimmed.contains('[')) {
-        trimmed
-            .strip_prefix("```")
-            .unwrap_or(trimmed)
-            .strip_suffix("```")
-            .unwrap_or(trimmed)
-            .trim()
-            .to_string()
-    } else {
-        trimmed.to_string()
     }
 }
 
@@ -157,7 +104,6 @@ pub fn compress_prompt_level(content: &str, mode: &str) -> String {
 
     let mut result = content.to_string();
 
-    // Common across all modes
     let removable_phrases = [
         "I would like you to please ",
         "Could you please ",
@@ -187,26 +133,30 @@ pub fn compress_prompt_level(content: &str, mode: &str) -> String {
         result = result.replace(phrase, "");
     }
 
-    // Mode-specific compression
-    match mode {
-        "ultra" => {
-            // Ultra: also remove filler adverbs, hedging, meta-commentary
-            let ultra_phrases = [
-                "basically ", "actually ", "essentially ", "literally ",
-                "honestly ", "frankly ", "just ", "simply ",
-                "I think ", "I believe ", "I'd say ",
-                "In my opinion, ", "From my perspective, ",
-                "It is worth noting that ", "It is worth mentioning that ",
-                "Let me preface this by saying ",
-                "Before we begin, ",
-                "First and foremost, ",
-            ];
-            for p in &ultra_phrases {
-                result = result.replace(p, "");
-            }
-            result = result.replace("  ", " ");
+    if mode == "ultra" {
+        let ultra_phrases = [
+            "basically ",
+            "actually ",
+            "essentially ",
+            "literally ",
+            "honestly ",
+            "frankly ",
+            "just ",
+            "simply ",
+            "I think ",
+            "I believe ",
+            "I'd say ",
+            "In my opinion, ",
+            "From my perspective, ",
+            "It is worth noting that ",
+            "It is worth mentioning that ",
+            "Let me preface this by saying ",
+            "Before we begin, ",
+            "First and foremost, ",
+        ];
+        for p in &ultra_phrases {
+            result = result.replace(p, "");
         }
-        _ => {} // "lite" and "full" just do basics
     }
 
     result = result.replace("  ", " ");
@@ -218,7 +168,9 @@ pub fn compress_prompt_level(content: &str, mode: &str) -> String {
 fn cache_dir() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
     let dir = PathBuf::from(&home).join(".local/share/token-pipeline/cache");
-    fs::create_dir_all(&dir).ok();
+    if let Err(e) = fs::create_dir_all(&dir) {
+        eprintln!("tp: warning: cannot create cache dir: {}", e);
+    }
     dir
 }
 
@@ -228,7 +180,12 @@ fn load_cache_from_disk() -> HashMap<String, CachedResponse> {
 
     if let Ok(read_dir) = fs::read_dir(&dir) {
         for entry in read_dir.flatten() {
-            if entry.path().extension().map(|e| e == "json").unwrap_or(false) {
+            if entry
+                .path()
+                .extension()
+                .map(|e| e == "json")
+                .unwrap_or(false)
+            {
                 if let Ok(data) = fs::read_to_string(entry.path()) {
                     if let Ok(cached) = serde_json::from_str::<CachedResponse>(&data) {
                         let key = entry
@@ -248,18 +205,35 @@ fn load_cache_from_disk() -> HashMap<String, CachedResponse> {
 }
 
 fn save_entry_to_disk(key: &str, entry: &CachedResponse) {
-    let path = cache_dir().join(format!("{}.json", &key[..32.min(key.len())]));
-    if let Ok(json) = serde_json::to_string(entry) {
-        fs::write(path, json).ok();
+    let path = cache_dir().join(format!("{}.json", key));
+    match serde_json::to_string(entry) {
+        Ok(json) => {
+            if let Err(e) = fs::write(&path, json) {
+                eprintln!("tp: warning: cache write failed: {}", e);
+            }
+        }
+        Err(e) => eprintln!("tp: warning: cache serialize failed: {}", e),
     }
+}
+
+fn remove_entry_from_disk(key: &str) {
+    let path = cache_dir().join(format!("{}.json", key));
+    let _ = fs::remove_file(path);
 }
 
 pub fn clear_disk_cache() {
     let dir = cache_dir();
     if let Ok(read_dir) = fs::read_dir(&dir) {
         for entry in read_dir.flatten() {
-            if entry.path().extension().map(|e| e == "json").unwrap_or(false) {
-                fs::remove_file(entry.path()).ok();
+            if entry
+                .path()
+                .extension()
+                .map(|e| e == "json")
+                .unwrap_or(false)
+            {
+                if let Err(e) = fs::remove_file(entry.path()) {
+                    eprintln!("tp: warning: failed to remove cache entry: {}", e);
+                }
             }
         }
     }
@@ -272,13 +246,148 @@ pub fn show_cache_info() {
 
     if let Ok(read_dir) = fs::read_dir(&dir) {
         for entry in read_dir.flatten() {
-            if entry.path().extension().map(|e| e == "json").unwrap_or(false) {
+            if entry
+                .path()
+                .extension()
+                .map(|e| e == "json")
+                .unwrap_or(false)
+            {
                 count += 1;
                 total_size += entry.metadata().map(|m| m.len()).unwrap_or(0);
             }
         }
     }
 
-    println!("Cache: {} entries, {:.1} KB", count, total_size as f64 / 1024.0);
+    println!(
+        "Cache: {} entries, {:.1} KB",
+        count,
+        total_size as f64 / 1024.0
+    );
     println!("Location: {}", dir.display());
+}
+
+fn now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_cache_key_deterministic() {
+        let key1 = ResponseCache::cache_key("hello", "gpt-4");
+        let key2 = ResponseCache::cache_key("hello", "gpt-4");
+        assert_eq!(key1, key2);
+        assert_eq!(key1.len(), 64);
+    }
+
+    #[test]
+    fn test_cache_key_different_models() {
+        let key1 = ResponseCache::cache_key("hello", "gpt-4");
+        let key2 = ResponseCache::cache_key("hello", "gpt-3.5");
+        assert_ne!(key1, key2);
+    }
+
+    #[test]
+    fn test_cache_put_get() {
+        let mut cache = ResponseCache::with_limits(3600, 100);
+        let key = "test_key".to_string();
+        cache.put(
+            key.clone(),
+            CachedResponse {
+                content: "cached content".to_string(),
+                model: "gpt-4".to_string(),
+                prompt_tokens: 10,
+                completion_tokens: 20,
+                timestamp: now_secs(),
+            },
+        );
+
+        let result = cache.get(&key);
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().content, "cached content");
+        assert_eq!(cache.hits, 1);
+    }
+
+    #[test]
+    fn test_cache_miss() {
+        let mut cache = ResponseCache::with_limits(3600, 100);
+        assert!(cache.get("nonexistent").is_none());
+        assert_eq!(cache.misses, 1);
+    }
+
+    #[test]
+    fn test_cache_lru_eviction() {
+        let mut cache = ResponseCache::with_limits(3600, 1000);
+        let initial = cache.entries.len();
+        let limit = initial + 2;
+        cache.max_entries = limit;
+
+        for i in 0..4 {
+            cache.put(
+                format!("evict_test_{}", i),
+                CachedResponse {
+                    content: format!("content_{}", i),
+                    model: "test".to_string(),
+                    prompt_tokens: 0,
+                    completion_tokens: 0,
+                    timestamp: now_secs(),
+                },
+            );
+        }
+
+        assert!(cache.entries.len() <= limit);
+    }
+
+    #[test]
+    fn test_compress_prompt_short_passthrough() {
+        let short = "Fix the bug.";
+        assert_eq!(compress_prompt(short), short);
+    }
+
+    #[test]
+    fn test_compress_prompt_removes_filler() {
+        let verbose = "Could you please help me with this task? I would like you to please fix the bug. Thank you very much for your help with this task.";
+        let result = compress_prompt(verbose);
+        assert!(!result.contains("Could you please"));
+        assert!(!result.contains("Thank you very much"));
+        assert!(result.len() < verbose.len());
+    }
+
+    #[test]
+    fn test_compress_prompt_ultra() {
+        let verbose = "I think we should basically just fix the bug. In my opinion, it's essentially a simple issue. First and foremost, let me preface this by saying it needs attention.";
+        let result = compress_prompt_level(verbose, "ultra");
+        assert!(!result.contains("basically"));
+        assert!(!result.contains("First and foremost"));
+        assert!(result.len() < verbose.len());
+    }
+
+    #[test]
+    fn test_cache_stats() {
+        let mut cache = ResponseCache::with_limits(3600, 1000);
+        let initial_entries = cache.entries.len();
+        let unique_key = format!("stats_test_{}", now_secs());
+        cache.put(
+            unique_key.clone(),
+            CachedResponse {
+                content: "c1".to_string(),
+                model: "m".to_string(),
+                prompt_tokens: 0,
+                completion_tokens: 0,
+                timestamp: now_secs(),
+            },
+        );
+        cache.get(&unique_key);
+        cache.get("absolutely_missing_key");
+
+        let (hits, misses, entries) = cache.stats();
+        assert_eq!(hits, 1);
+        assert_eq!(misses, 1);
+        assert!(entries >= initial_entries + 1);
+    }
 }

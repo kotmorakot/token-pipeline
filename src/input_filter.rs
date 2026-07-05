@@ -1,36 +1,82 @@
-/// Stage 1: Input Filtering — RTK-style command output compression
-///
-/// Each filter acts as a ConstraintPruner (KatGPT-RS concept):
-/// removes information the LLM does NOT need, keeps everything it DOES.
-///
-/// Safety guarantee: code, errors, paths, and data are preserved exactly.
-/// Only formatting, decoration, and redundant prose are removed.
-
 use std::collections::HashMap;
 
+#[allow(dead_code)]
 pub fn apply(cmd: &str, stdout: &str, stderr: &str, exit_code: i32) -> String {
     apply_with_ultra(cmd, stdout, stderr, exit_code, false)
 }
 
-/// Check if tp has a specific filter for this command
-/// Returns false for unknown commands → will fall back to rtk
+#[allow(dead_code)]
 pub fn is_known_command(cmd: &str) -> bool {
-    matches!(cmd,
-        "git" | "ls" | "dir" | "exa" | "eza" |
-        "cat" | "bat" | "head" | "tail" | "less" | "more" |
-        "cargo" | "npm" | "pnpm" | "yarn" | "bun" |
-        "pytest" | "jest" | "vitest" | "rspec" | "go" |
-        "grep" | "rg" | "ag" | "find" | "fd" |
-        "docker" | "podman" | "kubectl" | "oc" | "helm" |
-        "env" | "printenv" | "curl" | "wget" | "httpie" |
-        "tree" | "ps" | "df" |
-        "make" | "cmake" | "ninja" |
-        "python" | "python3" | "node" | "ruby" | "php" |
-        "gh" | "pip" | "pip3" | "uv" | "tsc" | "npx" | "next"
+    matches!(
+        cmd,
+        "git"
+            | "ls"
+            | "dir"
+            | "exa"
+            | "eza"
+            | "cat"
+            | "bat"
+            | "head"
+            | "tail"
+            | "less"
+            | "more"
+            | "cargo"
+            | "npm"
+            | "pnpm"
+            | "yarn"
+            | "bun"
+            | "pytest"
+            | "jest"
+            | "vitest"
+            | "rspec"
+            | "go"
+            | "grep"
+            | "rg"
+            | "ag"
+            | "find"
+            | "fd"
+            | "docker"
+            | "podman"
+            | "kubectl"
+            | "oc"
+            | "helm"
+            | "env"
+            | "printenv"
+            | "curl"
+            | "wget"
+            | "httpie"
+            | "tree"
+            | "ps"
+            | "df"
+            | "make"
+            | "cmake"
+            | "ninja"
+            | "python"
+            | "python3"
+            | "node"
+            | "ruby"
+            | "php"
+            | "gh"
+            | "pip"
+            | "pip3"
+            | "uv"
+            | "tsc"
+            | "npx"
+            | "next"
+            | "dotnet"
+            | "terraform"
+            | "aws"
+            | "gcloud"
     )
 }
 
-pub fn apply_with_ultra(cmd: &str, stdout: &str, stderr: &str, exit_code: i32, ultra: bool) -> String {
+pub fn apply_with_ultra(
+    cmd: &str,
+    stdout: &str,
+    stderr: &str,
+    exit_code: i32,
+    ultra: bool,
+) -> String {
     let parts: Vec<&str> = cmd.split_whitespace().collect();
     if parts.is_empty() {
         return format!("{}{}", stdout, stderr);
@@ -47,8 +93,11 @@ pub fn apply_with_ultra(cmd: &str, stdout: &str, stderr: &str, exit_code: i32, u
         "pytest" | "jest" | "vitest" | "rspec" | "go" => test_compact(stdout, stderr),
         "grep" | "rg" | "ag" => grep_compact(stdout),
         "find" | "fd" => find_compact(stdout),
-        "docker" | "podman" => apply_docker(parts.get(1).copied().unwrap_or(""), stdout, stderr, ultra),
-        "kubectl" | "oc" | "helm" => apply_kubectl(parts.get(1).copied().unwrap_or(""), stdout, stderr),
+        "docker" | "podman" => {
+            apply_docker(parts.get(1).copied().unwrap_or(""), stdout, stderr, ultra)
+        }
+        "kubectl" | "oc" => apply_kubectl(parts.get(1).copied().unwrap_or(""), stdout, stderr),
+        "helm" => apply_helm(parts.get(1).copied().unwrap_or(""), stdout, stderr),
         "gh" => apply_gh(parts.get(1).copied().unwrap_or(""), stdout, stderr),
         "env" | "printenv" => env_compact(stdout),
         "curl" | "wget" | "httpie" => truncate(stdout, 2000),
@@ -58,6 +107,9 @@ pub fn apply_with_ultra(cmd: &str, stdout: &str, stderr: &str, exit_code: i32, u
         "pip" | "pip3" | "uv" => apply_pip(parts.get(1).copied().unwrap_or(""), stdout),
         "tsc" | "npx" | "next" => build_compact(stdout, stderr),
         "make" | "cmake" | "ninja" => build_compact(stdout, stderr),
+        "dotnet" => apply_dotnet(parts.get(1).copied().unwrap_or(""), stdout, stderr, exit_code),
+        "terraform" => apply_terraform(parts.get(1).copied().unwrap_or(""), stdout, stderr),
+        "aws" | "gcloud" => generic_compact(stdout, stderr),
         "python" | "python3" | "node" | "ruby" | "php" => {
             if exit_code != 0 {
                 errors_only(stdout, stderr)
@@ -94,6 +146,13 @@ fn apply_cargo(sub: &str, stdout: &str, stderr: &str) -> String {
     match sub {
         "test" => test_compact(stdout, stderr),
         "build" | "check" | "clippy" => build_compact(stdout, stderr),
+        "fmt" => {
+            if stdout.trim().is_empty() && stderr.trim().is_empty() {
+                "ok cargo fmt\n".to_string()
+            } else {
+                format!("{}{}", stdout, stderr)
+            }
+        }
         "run" => generic_compact(stdout, stderr),
         _ => format!("{}{}", stdout, stderr),
     }
@@ -109,12 +168,12 @@ fn apply_js_runner(parts: &[&str], stdout: &str, stderr: &str) -> String {
     }
 }
 
-fn apply_docker(sub: &str, stdout: &str, stderr: &str, ultra: bool) -> String {
+fn apply_docker(sub: &str, stdout: &str, stderr: &str, _ultra: bool) -> String {
     match sub {
         "ps" => docker_ps(stdout),
         "images" => docker_images(stdout),
         "logs" => dedup_lines(stdout),
-        "compose" => docker_compose_ps(stdout),
+        "compose" => docker_compose_compact(stdout, stderr),
         "build" => build_compact(stdout, stderr),
         _ => format!("{}{}", stdout, stderr),
     }
@@ -122,52 +181,81 @@ fn apply_docker(sub: &str, stdout: &str, stderr: &str, ultra: bool) -> String {
 
 fn apply_kubectl(sub: &str, stdout: &str, stderr: &str) -> String {
     match sub {
-        "get" => {
-            let obj_type = stdout.lines().next().unwrap_or("");
-            let count = stdout.lines().count().saturating_sub(1);
-            if count <= 1 {
-                format!("{}", stdout)
+        "get" => kubectl_get(stdout),
+        "logs" => dedup_lines(stdout),
+        "describe" => kubectl_describe(stdout),
+        "apply" | "create" | "delete" => {
+            let lines: Vec<&str> = stdout
+                .lines()
+                .chain(stderr.lines())
+                .filter(|l| !l.trim().is_empty())
+                .collect();
+            if lines.len() <= 5 {
+                format!("{}{}", stdout, stderr)
             } else {
-                format!("{} ({} items)\n", stdout.lines().next().unwrap_or(""), count)
+                format!("{} resources affected:\n{}\n", lines.len(), lines[..5.min(lines.len())].join("\n"))
             }
         }
-        "logs" => dedup_lines(stdout),
         _ => format!("{}{}", stdout, stderr),
     }
 }
 
-fn apply_gh(sub: &str, stdout: &str, stderr: &str) -> String {
+fn apply_helm(sub: &str, stdout: &str, stderr: &str) -> String {
     match sub {
-        "pr" => {
+        "list" | "ls" => {
             let lines: Vec<&str> = stdout.lines().collect();
-            if lines.len() <= 15 {
-                return stdout.to_string();
+            if lines.len() <= 1 {
+                return "no releases\n".to_string();
             }
-            let mut result = format!("{} PRs:\n", lines.len());
-            for line in lines.iter().take(10) {
-                result.push_str(&format!("  {}\n", line));
+            let header = lines[0];
+            let count = lines.len() - 1;
+            if count <= 10 {
+                stdout.to_string()
+            } else {
+                format!("{}\n({} releases, showing first 10)\n{}\n", header, count, lines[1..11.min(lines.len())].join("\n"))
             }
-            if lines.len() > 10 {
-                result.push_str(&format!("  ... +{} more\n", lines.len() - 10));
-            }
-            result
         }
-        "issue" => {
-            let lines: Vec<&str> = stdout.lines().collect();
-            if lines.len() <= 15 {
-                return stdout.to_string();
+        "install" | "upgrade" => {
+            let meaningful: Vec<&str> = stdout
+                .lines()
+                .chain(stderr.lines())
+                .filter(|l| {
+                    let t = l.trim();
+                    !t.is_empty()
+                        && !t.starts_with("W:")
+                        && !t.starts_with("coalesce")
+                })
+                .collect();
+            if meaningful.len() <= 10 {
+                meaningful.join("\n") + "\n"
+            } else {
+                format!("{}\n... ({} more lines)\n", meaningful[..5].join("\n"), meaningful.len() - 5)
             }
-            format!("{} issues (showing first 10)\n{}\n...\n", lines.len(), lines[..10.min(lines.len())].join("\n"))
-        }
-        "run" => {
-            let lines: Vec<&str> = stdout.lines().collect();
-            if lines.len() <= 15 {
-                return stdout.to_string();
-            }
-            format!("{} workflow runs (showing first 10)\n{}\n...\n", lines.len(), lines[..10.min(lines.len())].join("\n"))
         }
         _ => format!("{}{}", stdout, stderr),
     }
+}
+
+fn apply_gh(sub: &str, stdout: &str, _stderr: &str) -> String {
+    match sub {
+        "pr" => truncate_list(stdout, "PRs"),
+        "issue" => truncate_list(stdout, "issues"),
+        "run" => truncate_list(stdout, "workflow runs"),
+        _ => stdout.to_string(),
+    }
+}
+
+fn truncate_list(stdout: &str, label: &str) -> String {
+    let lines: Vec<&str> = stdout.lines().collect();
+    if lines.len() <= 15 {
+        return stdout.to_string();
+    }
+    let mut result = format!("{} {}:\n", lines.len(), label);
+    for line in lines.iter().take(10) {
+        result.push_str(&format!("  {}\n", line));
+    }
+    result.push_str(&format!("  ... +{} more\n", lines.len() - 10));
+    result
 }
 
 fn apply_pip(sub: &str, stdout: &str) -> String {
@@ -177,7 +265,7 @@ fn apply_pip(sub: &str, stdout: &str) -> String {
             if lines.len() <= 5 {
                 return stdout.to_string();
             }
-            format!("{} packages (use `pip list` for details)\n", lines.len() - 2) // minus header
+            format!("{} packages\n", lines.len().saturating_sub(2))
         }
         "freeze" => {
             let lines: Vec<&str> = stdout.lines().collect();
@@ -187,6 +275,86 @@ fn apply_pip(sub: &str, stdout: &str) -> String {
             format!("{} packages\n", lines.len())
         }
         _ => stdout.to_string(),
+    }
+}
+
+fn apply_dotnet(sub: &str, stdout: &str, stderr: &str, exit_code: i32) -> String {
+    match sub {
+        "build" => build_compact(stdout, stderr),
+        "test" => test_compact(stdout, stderr),
+        "run" => {
+            if exit_code != 0 {
+                errors_only(stdout, stderr)
+            } else {
+                generic_compact(stdout, stderr)
+            }
+        }
+        "restore" => {
+            let combined = format!("{}{}", stdout, stderr);
+            let lines: Vec<&str> = combined.lines().collect();
+            let errors: Vec<&&str> = lines
+                .iter()
+                .filter(|l| l.contains("error") || l.contains("Error"))
+                .collect();
+            if errors.is_empty() {
+                "ok dotnet restore\n".to_string()
+            } else {
+                let mut result = format!("{} restore errors:\n", errors.len());
+                for e in errors.iter().take(10) {
+                    result.push_str(&format!("  {}\n", e.trim()));
+                }
+                result
+            }
+        }
+        "publish" => build_compact(stdout, stderr),
+        _ => format!("{}{}", stdout, stderr),
+    }
+}
+
+fn apply_terraform(sub: &str, stdout: &str, stderr: &str) -> String {
+    match sub {
+        "plan" => {
+            let combined = format!("{}{}", stdout, stderr);
+            let lines: Vec<&str> = combined.lines().collect();
+            let summary: Vec<&&str> = lines
+                .iter()
+                .filter(|l| {
+                    l.contains("Plan:") || l.contains("to add") || l.contains("to change")
+                        || l.contains("to destroy") || l.contains("No changes")
+                        || l.contains("Error")
+                })
+                .collect();
+            if !summary.is_empty() {
+                summary.iter().map(|l| l.trim()).collect::<Vec<_>>().join("\n") + "\n"
+            } else {
+                generic_compact(stdout, stderr)
+            }
+        }
+        "apply" | "destroy" => {
+            let combined = format!("{}{}", stdout, stderr);
+            let lines: Vec<&str> = combined.lines().collect();
+            let meaningful: Vec<&&str> = lines
+                .iter()
+                .filter(|l| {
+                    l.contains("Apply complete") || l.contains("Destroy complete")
+                        || l.contains("Error") || l.contains("created")
+                        || l.contains("destroyed")
+                })
+                .collect();
+            if !meaningful.is_empty() {
+                meaningful.iter().map(|l| l.trim()).collect::<Vec<_>>().join("\n") + "\n"
+            } else {
+                generic_compact(stdout, stderr)
+            }
+        }
+        "init" => {
+            if stderr.contains("Error") || stdout.contains("Error") {
+                errors_only(stdout, stderr)
+            } else {
+                "ok terraform init\n".to_string()
+            }
+        }
+        _ => generic_compact(stdout, stderr),
     }
 }
 
@@ -259,7 +427,11 @@ fn git_status(stdout: &str) -> String {
     }
 
     if staged.is_empty() && modified.is_empty() && untracked.is_empty() {
-        format!("[{}] {}\n", branch, stdout.lines().last().unwrap_or("unknown state"))
+        format!(
+            "[{}] {}\n",
+            branch,
+            stdout.lines().last().unwrap_or("unknown state")
+        )
     } else {
         result
     }
@@ -280,16 +452,17 @@ fn git_diff(stdout: &str) -> String {
 
     let mut result = Vec::new();
     let mut current_file = String::new();
-    let mut stats = (0usize, 0usize);
+    let mut file_adds = 0usize;
+    let mut file_dels = 0usize;
+    let mut file_start_idx = 0usize;
 
     for line in stdout.lines() {
         if line.starts_with("diff --git") {
-            if !current_file.is_empty() && (stats.0 > 0 || stats.1 > 0) {
-                result.push(format!(
-                    "--- {} (+{} -{}) ---",
-                    current_file, stats.0, stats.1
-                ));
-                stats = (0, 0);
+            if !current_file.is_empty() {
+                result.insert(
+                    file_start_idx,
+                    format!("--- {} (+{} -{}) ---", current_file, file_adds, file_dels),
+                );
             }
             current_file = line
                 .split_whitespace()
@@ -297,35 +470,25 @@ fn git_diff(stdout: &str) -> String {
                 .unwrap_or("")
                 .trim_start_matches("b/")
                 .to_string();
+            file_adds = 0;
+            file_dels = 0;
+            file_start_idx = result.len();
         } else if line.starts_with("@@") {
-            let hunk_header = line
-                .split("@@")
-                .nth(2)
-                .unwrap_or("")
-                .trim();
-            if !hunk_header.is_empty() {
-                result.push(format!("  @@ {} @@", line.split("@@").nth(1).unwrap_or("").trim()));
-                result.push(format!("  // {}", hunk_header));
-            } else {
-                result.push(format!("  @@ {} @@", line.split("@@").nth(1).unwrap_or("").trim()));
-            }
+            let hunk_info = line.split("@@").nth(1).unwrap_or("").trim();
+            result.push(format!("  @@ {} @@", hunk_info));
         } else if line.starts_with('+') && !line.starts_with("+++") {
             result.push(format!("  {}", line));
-            stats.0 += 1;
+            file_adds += 1;
         } else if line.starts_with('-') && !line.starts_with("---") {
             result.push(format!("  {}", line));
-            stats.1 += 1;
+            file_dels += 1;
         }
     }
 
     if !current_file.is_empty() {
         result.insert(
-            result
-                .iter()
-                .rposition(|l| l.starts_with("---"))
-                .map(|i| i + 1)
-                .unwrap_or(0),
-            format!("--- {} (+{} -{}) ---", current_file, stats.0, stats.1),
+            file_start_idx,
+            format!("--- {} (+{} -{}) ---", current_file, file_adds, file_dels),
         );
     }
 
@@ -363,7 +526,10 @@ fn git_log(stdout: &str) -> String {
                 .unwrap_or("")
                 .trim()
                 .to_string();
-        } else if !line.starts_with("Date:") && !line.trim().is_empty() && !hash.is_empty() && msg.is_empty()
+        } else if !line.starts_with("Date:")
+            && !line.trim().is_empty()
+            && !hash.is_empty()
+            && msg.is_empty()
         {
             msg = line.trim().to_string();
         }
@@ -404,10 +570,15 @@ fn git_show(stdout: &str) -> String {
                 && !line.starts_with(' '))
         {
             result.push(*line);
-        } else if !trimmed.is_empty() && (line.starts_with("    ") || line.starts_with('\t')) {
-            if result.last().map(|l: &&str| l.starts_with("Date:")).unwrap_or(false) || result.is_empty() {
-                result.push(*line);
-            }
+        } else if !trimmed.is_empty()
+            && (line.starts_with("    ") || line.starts_with('\t'))
+            && (result
+                .last()
+                .map(|l: &&str| l.starts_with("Date:"))
+                .unwrap_or(false)
+                || result.is_empty())
+        {
+            result.push(*line);
         }
     }
 
@@ -424,17 +595,17 @@ fn git_branch(stdout: &str) -> String {
         return stdout.to_string();
     }
 
-    let current = lines.iter().find(|l| l.starts_with("* ")).copied().unwrap_or("* ?");
+    let current = lines
+        .iter()
+        .find(|l| l.starts_with("* "))
+        .copied()
+        .unwrap_or("* ?");
     let others: Vec<&str> = lines
         .iter()
         .filter(|l| !l.starts_with("* "))
         .copied()
         .collect();
-    format!(
-        "{}\n({} other branches)\n",
-        current.trim(),
-        others.len()
-    )
+    format!("{}\n({} other branches)\n", current.trim(), others.len())
 }
 
 fn git_action(sub: &str, stdout: &str, stderr: &str, exit_code: i32) -> String {
@@ -468,31 +639,57 @@ fn git_action(sub: &str, stdout: &str, stderr: &str, exit_code: i32) -> String {
             )
         }
     } else {
-        format!("FAIL: git {} (exit {})\n{}{}", sub, exit_code, stdout, stderr)
+        format!(
+            "FAIL: git {} (exit {})\n{}{}",
+            sub, exit_code, stdout, stderr
+        )
     }
 }
 
 // ─── File/Directory Filters ──────────────────────────────────────
 
 fn ls_compact(stdout: &str, ultra: bool) -> String {
+    let lines: Vec<&str> = stdout.lines().filter(|l| !l.trim().is_empty()).collect();
+    if lines.is_empty() {
+        return stdout.to_string();
+    }
+
+    let is_long_format = lines.iter().any(|l| {
+        let first = l.chars().next().unwrap_or(' ');
+        matches!(first, 'd' | '-' | 'l' | 'c' | 'b' | 'p' | 's')
+            && l.split_whitespace().count() >= 8
+    });
+
     let mut dirs = Vec::new();
     let mut files = Vec::new();
 
-    for line in stdout.lines() {
+    for line in &lines {
         let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with("total ") {
+        if trimmed.starts_with("total ") {
             continue;
         }
 
-        let name = trimmed.split_whitespace().last().unwrap_or(trimmed);
-        if name == "." || name == ".." {
-            continue;
-        }
-
-        if trimmed.starts_with('d') || name.ends_with('/') {
-            dirs.push(name.trim_end_matches('/'));
+        if is_long_format {
+            let name = trimmed.split_whitespace().last().unwrap_or(trimmed);
+            if name == "." || name == ".." {
+                continue;
+            }
+            if trimmed.starts_with('d') {
+                dirs.push(name.trim_end_matches('/'));
+            } else {
+                files.push(name);
+            }
         } else {
-            files.push(name);
+            for name in trimmed.split_whitespace() {
+                if name == "." || name == ".." {
+                    continue;
+                }
+                if name.ends_with('/') {
+                    dirs.push(name.trim_end_matches('/'));
+                } else {
+                    files.push(name);
+                }
+            }
         }
     }
 
@@ -501,12 +698,16 @@ fn ls_compact(stdout: &str, ultra: bool) -> String {
     }
 
     if ultra {
-        // Ultra-compact: just show counts per extension
-        let mut ext_counts: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
-        let mut count_other = 0u32;
+        let mut ext_counts: std::collections::BTreeMap<String, usize> =
+            std::collections::BTreeMap::new();
+        let mut count_other = 0usize;
         for f in &files {
-            let ext = f.rsplit('.').nth(1).map(|e| e.to_lowercase()).unwrap_or_else(|| "(no ext)".to_string());
             if f.contains('.') {
+                let ext = f
+                    .rsplit('.')
+                    .next()
+                    .map(|e| e.to_lowercase())
+                    .unwrap_or_default();
                 *ext_counts.entry(ext).or_insert(0) += 1;
             } else {
                 count_other += 1;
@@ -536,14 +737,16 @@ fn smart_read(stdout: &str, filename: Option<&str>) -> String {
     let lines: Vec<&str> = stdout.lines().collect();
     let name = filename.unwrap_or("file");
 
-    // Always show compact signature summary, even for small files
+    if lines.len() <= 100 {
+        return stdout.to_string();
+    }
+
     let mut result = Vec::new();
-    result.push(format!("# {} ({} lines, key signatures)", name, lines.len()));
+    result.push(format!("# {} ({} lines)", name, lines.len()));
 
     let mut key_lines: Vec<(usize, &str)> = Vec::new();
 
     for (i, line) in lines.iter().enumerate() {
-
         let t = line.trim();
         let is_key = t.starts_with("pub ")
             || t.starts_with("fn ")
@@ -561,11 +764,8 @@ fn smart_read(stdout: &str, filename: Option<&str>) -> String {
             || t.starts_with("import ")
             || t.starts_with("from ")
             || t.starts_with("const ")
-            || t.starts_with("let ")
-            || t.starts_with("var ")
             || t.starts_with("interface ")
             || t.starts_with("#[")
-            || t.starts_with("@")
             || t.starts_with("///")
             || t.starts_with("//!")
             || t.starts_with("# ")
@@ -577,26 +777,32 @@ fn smart_read(stdout: &str, filename: Option<&str>) -> String {
     }
 
     if key_lines.is_empty() {
-        // No key lines found — show first/last 10 lines
-        if lines.len() <= 20 {
-            result.extend(lines.iter().enumerate().map(|(i, l)| format!("{:4}| {}", i + 1, l)));
+        if lines.len() <= 30 {
+            result.extend(
+                lines
+                    .iter()
+                    .enumerate()
+                    .map(|(i, l)| format!("{:4}| {}", i + 1, l)),
+            );
         } else {
-            for i in 0..10 {
+            for i in 0..15 {
                 result.push(format!("{:4}| {}", i + 1, lines[i]));
             }
             result.push("  ...".to_string());
-            for i in lines.len().saturating_sub(5)..lines.len() {
+            for i in lines.len().saturating_sub(10)..lines.len() {
                 result.push(format!("{:4}| {}", i + 1, lines[i]));
             }
         }
     } else {
-        // Show key lines with "... N more" if file is large
-        let max_keys = if lines.len() > 80 { 30 } else { 999 };
-        for (i, (lineno, line)) in key_lines.iter().enumerate().take(max_keys) {
+        let max_keys = if lines.len() > 200 { 40 } else { 60 };
+        for (_i, (lineno, line)) in key_lines.iter().enumerate().take(max_keys) {
             result.push(format!("{:4}| {}", lineno, line));
         }
         if key_lines.len() > max_keys {
-            result.push(format!("  ... +{} key lines omitted", key_lines.len() - max_keys));
+            result.push(format!(
+                "  ... +{} key lines omitted",
+                key_lines.len() - max_keys
+            ));
         }
     }
 
@@ -642,22 +848,30 @@ fn tree_compact(stdout: &str) -> String {
     }
 
     let mut result = Vec::new();
-    let mut depth_counts: HashMap<usize, usize> = HashMap::new();
 
     for line in &lines {
-        let depth = line.len() - line.trim_start_matches(|c: char| c == ' ' || c == '│' || c == '├' || c == '└' || c == '─' || c == '|').len();
-        *depth_counts.entry(depth / 4).or_insert(0) += 1;
+        let depth = line
+            .len()
+            .saturating_sub(
+                line.trim_start_matches(|c: char| {
+                    c == ' ' || c == '\u{2502}' || c == '\u{251c}' || c == '\u{2514}'
+                        || c == '\u{2500}' || c == '|'
+                })
+                .len(),
+            );
 
         if depth / 4 <= 2 {
-            result.push(*line);
+            result.push(line.to_string());
         }
     }
 
     if result.len() < lines.len() {
-        result.push(&"");
         let omitted = lines.len() - result.len();
-        let summary = format!("({} deeper entries omitted, {} total)", omitted, lines.len());
-        result.push(Box::leak(summary.into_boxed_str()));
+        result.push(format!(
+            "({} deeper entries omitted, {} total)",
+            omitted,
+            lines.len()
+        ));
     }
 
     result.join("\n") + "\n"
@@ -678,7 +892,12 @@ fn test_compact(stdout: &str, stderr: &str) -> String {
     for line in &lines {
         let t = line.trim();
 
-        if t.contains("FAILED") || t.contains("FAIL ") || t.contains("panicked at") || t.contains("AssertionError") || t.contains("error[E") {
+        if t.contains("FAILED")
+            || t.contains("FAIL ")
+            || t.contains("panicked at")
+            || t.contains("AssertionError")
+            || t.contains("error[E")
+        {
             in_failure = true;
             failure_buf.push(line.to_string());
         } else if in_failure {
@@ -693,7 +912,10 @@ fn test_compact(stdout: &str, stderr: &str) -> String {
             }
         }
 
-        if t.contains("test result:") || t.contains("Tests:") || (t.contains("passed") && t.contains("failed")) {
+        if t.contains("test result:")
+            || t.contains("Tests:")
+            || (t.contains("passed") && t.contains("failed"))
+        {
             summary_line = t.to_string();
         }
 
@@ -712,7 +934,11 @@ fn test_compact(stdout: &str, stderr: &str) -> String {
         } else if test_count > 0 {
             format!("ok {} tests passed\n", test_count)
         } else {
-            let last_meaningful = lines.iter().rev().find(|l| !l.trim().is_empty()).unwrap_or(&"done");
+            let last_meaningful = lines
+                .iter()
+                .rev()
+                .find(|l| !l.trim().is_empty())
+                .unwrap_or(&"done");
             format!("ok {}\n", last_meaningful.trim())
         }
     } else {
@@ -747,7 +973,12 @@ fn build_compact(stdout: &str, stderr: &str) -> String {
 
     let summary: Vec<&str> = lines
         .iter()
-        .filter(|l| l.contains("Finished") || l.contains("error:") || l.contains("warning:") || l.contains("Error:"))
+        .filter(|l| {
+            l.contains("Finished")
+                || l.contains("error:")
+                || l.contains("warning:")
+                || l.contains("Error:")
+        })
         .map(|l| l.trim())
         .collect();
 
@@ -839,12 +1070,76 @@ fn docker_images(stdout: &str) -> String {
     result
 }
 
-fn docker_compose_ps(stdout: &str) -> String {
-    let lines: Vec<&str> = stdout.lines().collect();
-    if lines.len() <= 1 {
+fn docker_compose_compact(stdout: &str, stderr: &str) -> String {
+    let combined = format!("{}{}", stdout, stderr);
+    let lines: Vec<&str> = combined.lines().filter(|l| !l.trim().is_empty()).collect();
+    if lines.is_empty() {
         return "no services\n".to_string();
     }
-    format!("{} services:\n{}\n", lines.len() - 1, lines[..lines.len().min(5)].join("\n"))
+    if lines.len() <= 10 {
+        return combined;
+    }
+    format!(
+        "{} lines (first 10):\n{}\n... +{} more\n",
+        lines.len(),
+        lines[..10.min(lines.len())].join("\n"),
+        lines.len().saturating_sub(10)
+    )
+}
+
+fn kubectl_get(stdout: &str) -> String {
+    let lines: Vec<&str> = stdout.lines().collect();
+    if lines.len() <= 1 {
+        return stdout.to_string();
+    }
+
+    let header = lines[0];
+    let data_lines = &lines[1..];
+    let count = data_lines.len();
+
+    if count <= 15 {
+        return stdout.to_string();
+    }
+
+    let mut result = format!("{}\n", header);
+    for line in data_lines.iter().take(10) {
+        result.push_str(&format!("{}\n", line));
+    }
+    result.push_str(&format!("... +{} more ({} total)\n", count - 10, count));
+    result
+}
+
+fn kubectl_describe(stdout: &str) -> String {
+    let lines: Vec<&str> = stdout.lines().collect();
+    if lines.len() <= 50 {
+        return stdout.to_string();
+    }
+
+    let mut result = Vec::new();
+    for line in &lines {
+        let trimmed = line.trim();
+        if trimmed.ends_with(':') && !trimmed.starts_with(' ') {
+            result.push(line.to_string());
+        } else if line.starts_with("Name:")
+            || line.starts_with("Namespace:")
+            || line.starts_with("Status:")
+            || line.starts_with("IP:")
+            || line.starts_with("Node:")
+            || line.starts_with("Start Time:")
+            || line.contains("Error")
+            || line.contains("Warning")
+            || line.contains("Restart Count:")
+        {
+            result.push(line.to_string());
+        }
+    }
+
+    if result.len() < lines.len() / 2 {
+        result.push(format!("({} lines total, key fields shown)", lines.len()));
+        result.join("\n") + "\n"
+    } else {
+        stdout.to_string()
+    }
 }
 
 fn ps_compact(stdout: &str) -> String {
@@ -855,7 +1150,11 @@ fn ps_compact(stdout: &str) -> String {
 
     let header = lines.first().unwrap_or(&"");
     let procs: Vec<&str> = lines.iter().skip(1).copied().collect();
-    format!("{}\n({} processes, showing header only)\n", header, procs.len())
+    format!(
+        "{}\n({} processes, showing header only)\n",
+        header,
+        procs.len()
+    )
 }
 
 fn df_compact(stdout: &str) -> String {
@@ -868,13 +1167,16 @@ fn df_compact(stdout: &str) -> String {
             let use_pct = parts.get(4).copied().unwrap_or("0%");
             let pct_num: u32 = use_pct.trim_end_matches('%').parse().unwrap_or(0);
             if pct_num >= 70 || result.is_empty() {
-                result.push(*line);
+                result.push(line.to_string());
             }
         }
     }
 
     if result.len() < lines.len() {
-        result.push(Box::leak(format!("({} filesystems total, showing >70% used)", lines.len() - 1).into_boxed_str()));
+        result.push(format!(
+            "({} filesystems total, showing >70% used)",
+            lines.len() - 1
+        ));
     }
     result.join("\n") + "\n"
 }
@@ -914,16 +1216,16 @@ fn env_compact(stdout: &str) -> String {
     let lines: Vec<&str> = stdout.lines().collect();
     let mut result = format!("{} vars:\n", lines.len());
 
+    let sensitive_patterns = [
+        "SECRET", "TOKEN", "PASSWORD", "CREDENTIAL", "PRIVATE",
+    ];
+
     for line in &lines {
         if let Some((key, val)) = line.split_once('=') {
             let k = key.to_uppercase();
-            if k.contains("SECRET")
-                || k.contains("TOKEN")
-                || k.contains("PASSWORD")
-                || k.contains("KEY")
-                || k.contains("CREDENTIAL")
-                || k.contains("AUTH")
-            {
+            let is_sensitive = sensitive_patterns.iter().any(|p| k.contains(p))
+                || (k.ends_with("_KEY") && k != "TERM_SESSION_KEY");
+            if is_sensitive {
                 result.push_str(&format!("  {}=***\n", key));
             } else if val.len() > 80 {
                 result.push_str(&format!("  {}={}...\n", key, &val[..60.min(val.len())]));
@@ -940,7 +1242,7 @@ fn truncate(stdout: &str, max: usize) -> String {
         return stdout.to_string();
     }
     format!(
-        "{}...\n[truncated: {} → {} chars]\n",
+        "{}...\n[truncated: {} -> {} chars]\n",
         &stdout[..max],
         stdout.len(),
         max
@@ -986,7 +1288,7 @@ fn generic_compact(stdout: &str, stderr: &str) -> String {
 
     if dedup_lines_count < lines.len() / 2 {
         format!(
-            "{} lines → {} unique:\n{}",
+            "{} lines -> {} unique:\n{}",
             lines.len(),
             dedup_lines_count,
             deduped
@@ -1002,5 +1304,148 @@ fn generic_compact(stdout: &str, stderr: &str) -> String {
         )
     } else {
         combined
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_git_status_clean() {
+        let stdout = "On branch main\nYour branch is up to date with 'origin/main'.\n\nnothing to commit, working tree clean\n";
+        let result = git_status(stdout);
+        assert_eq!(result, "[main] clean\n");
+    }
+
+    #[test]
+    fn test_git_status_modified() {
+        let stdout = "On branch dev\nChanges not staged for commit:\n  (use \"git add <file>...\" to update)\n\tmodified:   src/main.rs\n\nUntracked files:\n  (use \"git add <file>...\" to include)\n\tREADME.md\n";
+        let result = git_status(stdout);
+        assert!(result.contains("[dev]"));
+        assert!(result.contains("M src/main.rs"));
+        assert!(result.contains("? README.md"));
+    }
+
+    #[test]
+    fn test_git_diff_empty() {
+        assert_eq!(git_diff(""), "no changes\n");
+        assert_eq!(git_diff("  \n"), "no changes\n");
+    }
+
+    #[test]
+    fn test_git_diff_basic() {
+        let stdout = "diff --git a/src/main.rs b/src/main.rs\nindex abc..def 100644\n--- a/src/main.rs\n+++ b/src/main.rs\n@@ -10,3 +10,4 @@ fn main() {\n-    old_line();\n+    new_line();\n+    added_line();\n";
+        let result = git_diff(stdout);
+        assert!(result.contains("src/main.rs"));
+        assert!(result.contains("+2 -1"));
+        assert!(result.contains("+    new_line();"));
+        assert!(result.contains("-    old_line();"));
+    }
+
+    #[test]
+    fn test_git_log_compact() {
+        let stdout = "commit abc1234567890\nAuthor: John Doe <john@example.com>\nDate:   Mon Jan 1 2024\n\n    Initial commit\n\ncommit def5678901234\nAuthor: Jane <jane@example.com>\nDate:   Tue Jan 2 2024\n\n    Add feature\n";
+        let result = git_log(stdout);
+        assert!(result.contains("abc1234"));
+        assert!(result.contains("Initial commit"));
+        assert!(result.contains("John Doe"));
+        assert!(result.contains("def5678"));
+    }
+
+    #[test]
+    fn test_test_compact_pass() {
+        let stdout = "running 3 tests\ntest test_a ... ok\ntest test_b ... ok\ntest test_c ... ok\n\ntest result: ok. 3 passed; 0 failed; 0 ignored\n";
+        let result = test_compact(stdout, "");
+        assert!(result.starts_with("ok"));
+        assert!(result.contains("3 passed"));
+    }
+
+    #[test]
+    fn test_test_compact_fail() {
+        let stdout = "test test_a ... ok\ntest test_b ... FAILED\nthread 'test_b' panicked at 'assertion failed'\n\ntest result: ok. 1 passed; 1 failed\n";
+        let result = test_compact(stdout, "");
+        assert!(result.contains("FAILED"));
+        assert!(result.contains("panicked"));
+    }
+
+    #[test]
+    fn test_build_compact_ok() {
+        let stdout = "   Compiling myproject v0.1.0\n    Finished dev [unoptimized + debuginfo] target(s) in 2.5s\n";
+        let result = build_compact(stdout, "");
+        assert!(result.starts_with("ok"));
+    }
+
+    #[test]
+    fn test_ls_compact_long() {
+        let stdout = "total 16\ndrwxr-xr-x 2 user group 4096 Jan  1 00:00 src\n-rw-r--r-- 1 user group  100 Jan  1 00:00 Cargo.toml\n-rw-r--r-- 1 user group  200 Jan  1 00:00 README.md\n";
+        let result = ls_compact(stdout, false);
+        assert!(result.contains("1 dirs, 2 files"));
+        assert!(result.contains("src/"));
+        assert!(result.contains("Cargo.toml"));
+    }
+
+    #[test]
+    fn test_ls_compact_plain() {
+        let stdout = "Cargo.toml  README.md  src/\n";
+        let result = ls_compact(stdout, false);
+        assert!(result.contains("dirs"));
+        assert!(result.contains("files"));
+    }
+
+    #[test]
+    fn test_env_compact_masking() {
+        let stdout = "HOME=/home/user\nSECRET_KEY=abc123\nMONKEY=banana\nAPI_TOKEN=xyz\nPATH=/usr/bin\nPRIVATE_KEY=secret\n";
+        let result = env_compact(stdout);
+        assert!(result.contains("SECRET_KEY=***"));
+        assert!(result.contains("API_TOKEN=***"));
+        assert!(result.contains("PRIVATE_KEY=***"));
+        assert!(result.contains("MONKEY=banana"));
+        assert!(result.contains("HOME=/home/user"));
+    }
+
+    #[test]
+    fn test_smart_read_small_file() {
+        let lines: Vec<String> = (1..=50).map(|i| format!("line {}", i)).collect();
+        let stdout = lines.join("\n");
+        let result = smart_read(&stdout, Some("test.txt"));
+        assert_eq!(result, stdout);
+    }
+
+    #[test]
+    fn test_kubectl_get_preserves_data() {
+        let stdout = "NAME    READY   STATUS    RESTARTS   AGE\npod-1   1/1     Running   0          1d\npod-2   1/1     Running   0          2d\n";
+        let result = kubectl_get(stdout);
+        assert!(result.contains("pod-1"));
+        assert!(result.contains("pod-2"));
+    }
+
+    #[test]
+    fn test_generic_compact_short() {
+        let stdout = "line1\nline2\nline3\n";
+        assert_eq!(generic_compact(stdout, ""), format!("{}",stdout));
+    }
+
+    #[test]
+    fn test_dotnet_restore_ok() {
+        let stdout = "  Determining projects to restore...\n  Restored /home/user/project.csproj\n";
+        let result = apply_dotnet("restore", stdout, "", 0);
+        assert_eq!(result, "ok dotnet restore\n");
+    }
+
+    #[test]
+    fn test_errors_only_with_errors() {
+        let stderr = "error: something went wrong\nfatal: cannot continue\n";
+        let result = errors_only("", stderr);
+        assert!(result.contains("2 errors"));
+        assert!(result.contains("something went wrong"));
+    }
+
+    #[test]
+    fn test_is_known_command() {
+        assert!(is_known_command("git"));
+        assert!(is_known_command("dotnet"));
+        assert!(is_known_command("terraform"));
+        assert!(!is_known_command("unknown_tool"));
     }
 }

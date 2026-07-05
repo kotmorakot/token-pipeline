@@ -1,68 +1,66 @@
-# Token Pipeline — Agent Instructions
+# Token Pipeline v0.2.0 — Agent Instructions
 
-## What is Token Pipeline?
+## What is tp?
 
-`tp` is a CLI middleware that reduces token consumption by filtering command outputs and compressing LLM responses. It sits between you (the AI agent) and the system, making every interaction more efficient.
+`tp` is a CLI middleware that reduces token consumption by filtering command outputs and compressing LLM responses. It sits between you and the system, making every interaction more efficient.
 
-## Rules for Using tp
+## Rules
 
 ### 1. Command Execution
-Always use `tp run` to execute shell commands instead of running them directly:
+Always use `tp run` to execute shell commands:
 
 ```bash
-# Instead of:
-git status
-
-# Use:
-tp run git status
+# Instead of:         Use:
+git status            tp run git status
+cargo test            tp run cargo test
+ls -la                tp run ls -la
 ```
 
-This automatically compresses command output, removing noise that wastes your context window.
+### 2. File Reading
+For reading files with smart context extraction:
 
-### 2. Supported Commands (Auto-Filtered)
-These commands get smart filtering:
-- `tp run git status|diff|log|show|branch` — compact git output
-- `tp run ls|find|tree` — compact file listings  
-- `tp run cargo test|build|check` — failures/errors only
-- `tp run npm test|run build` — test summaries
-- `tp run grep|rg` — grouped search results
-- `tp run docker ps|images|logs` — compact container info
-- `tp run cat|head|tail` — smart file read (key parts only)
-- Any other command — generic dedup + truncation
+```bash
+tp read src/main.rs       # signatures for large files, full for small
+tp read .                 # directory summary
+```
 
 ### 3. Text Compression
-For large text inputs, pipe through `tp shrink`:
+For large text inputs:
 
 ```bash
-cat large_file.rs | tp shrink
+cat large_file.rs | tp shrink        # auto-detect mode
+cat file.rs | tp shrink ultra        # maximum compression
 ```
 
-### 4. Statistics
-Check how much you've saved:
+### 4. Supported Commands (Auto-Filtered)
+- `git status|diff|log|show|branch|push|pull` — compact git output
+- `ls|find|tree` — compact file listings
+- `cargo test|build|check|clippy|fmt` — failures/errors only
+- `npm|yarn|pnpm test|build` — test summaries
+- `grep|rg|ag` — grouped search results
+- `docker ps|images|logs|compose` — compact container info
+- `kubectl get|logs|describe` — compact k8s output
+- `helm list|install|upgrade` — compact helm output
+- `dotnet build|test|restore` — .NET summaries
+- `terraform plan|apply` — change summaries
+- `cat|head|tail` — smart file read
+- Any other command — generic dedup + truncation
+
+### 5. Statistics
 ```bash
-tp run stats
+tp stats              # summary
+tp gain               # detailed analytics
+tp discover           # find missed savings
 ```
 
-## Important Notes
+### 6. Compound Commands
+tp handles compound commands transparently when hooks are installed:
+```bash
+cargo fmt && cargo test       # both get filtered
+git add . && git commit -m x  # both get filtered
+```
 
-- `tp` never modifies the actual command behavior — only the OUTPUT is compressed
-- Exit codes are preserved exactly
-- Error messages are shown in full
-- Code blocks in outputs are never modified
-- If a filter seems wrong, run the command directly (without `tp run`)
+## Safety Guarantees
 
-## Compression Guarantee
-
-What is NEVER modified:
-- Exit codes
-- Error messages and stack traces  
-- File paths
-- Code content
-- URLs
-- Command syntax
-
-What IS compressed:
-- Verbose formatting (git's decorative headers)
-- Duplicate lines
-- Boilerplate text (progress bars, loading indicators)
-- Redundant whitespace
+NEVER modified: exit codes, error messages, stack traces, file paths, code content, URLs.
+IS compressed: verbose formatting, duplicate lines, boilerplate, progress bars, redundant whitespace.

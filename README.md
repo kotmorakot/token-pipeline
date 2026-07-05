@@ -1,136 +1,310 @@
-# Token Pipeline (tp)
+# tp — token-pipeline
 
-**Full token optimization pipeline: RTK filter + KatGPT-RS optimize + Caveman compress**
+**Save tokens. Keep the signal. Drop the noise.**
 
-ลด token usage 40-87% ทุกครั้งที่ AI agent รัน command หรือเรียก LLM
+`tp` sits between your AI agent and the shell/API. It compresses command output before it hits the context window, and compresses LLM responses before you pay for them.
+
+Replaces [rtk-ai](https://github.com/rtk-ai/rtk) (CLI filtering) and [Caveman](https://github.com/juliusbrussee/caveman) (response compression) in one standalone binary.
 
 ```
-┌─────────────────────────────────────────────────────┐
-│   Token Pipeline                                     │
-│                                                      │
-│   Stage 1: INPUT     RTK-style command filtering     │
-│   Stage 2: OPTIMIZE  BLAKE3 cache + validation       │
-│   Stage 3: OUTPUT    Caveman-style compression       │
-│                                                      │
-│   Result: 40-87% fewer tokens                        │
-└─────────────────────────────────────────────────────┘
+  Agent  →  tp run git status  →  [filter]  →  compact output  →  Agent
+  Agent  →  tp proxy           →  [cache + compress]  →  LLM API
 ```
+
+---
+
+## Why use tp?
+
+| Problem | tp solution |
+|---------|-------------|
+| `git status` fills 200 tokens with decoration | `[main] clean` — 5 tokens |
+| `cargo test` dumps 500 lines on success | `ok 42 tests passed` — one line |
+| Same LLM prompt asked twice | BLAKE3 cache — instant, free |
+| Verbose AI replies cost money | Caveman compression — terse prose, exact code |
+
+**What stays exact:** exit codes, errors, stack traces, file paths, code blocks, URLs.
+
+**What gets trimmed:** progress bars, duplicate lines, git headers, filler words, hedging.
+
+---
 
 ## Install
 
-```bash
-cd token-pipeline
-cargo build --release
-# Binary อยู่ที่ target/release/tp
-
-# (Optional) copy ไปที่ PATH
-cp target/release/tp ~/.local/bin/
-```
-
-## Quick Start
-
-### CLI Mode — filter command output
+**One-liner (recommended):**
 
 ```bash
-tp run git status      # [main] staged: + file.rs
-tp run git diff        # changed lines only
-tp run git log -n 5    # one-line commits
-tp run cargo test      # "ok 12 passed" (or failures detail)
-tp run ls -la          # "4 dirs, 8 files"
-tp run find . -name "*.rs"  # grouped by directory
+curl -fsSL https://raw.githubusercontent.com/kotmorakot/token-pipline/main/install.sh | bash
 ```
 
-### Shrink Mode — compress any text
+**From source:**
+
+```bash
+git clone https://github.com/kotmorakot/token-pipline.git
+cd token-pipline
+cargo install --path .
+```
+
+Verify:
+
+```bash
+tp --version   # tp (token-pipeline) v1.0.0
+```
+
+---
+
+## 30-second start
+
+```bash
+# 1. Filter a command (most common use)
+tp run git status
+tp run cargo test
+
+# 2. See how much you saved
+tp stats
+
+# 3. Auto-wrap commands for your AI agent
+tp init auto
+```
+
+After `tp init auto`, commands like `git status` are rewritten to `tp run git status` automatically.
+
+---
+
+## How it works
+
+Three stages, two entry points:
+
+```
+CLI path:   shell command  →  Stage 1 Filter  →  compact output to agent
+
+Proxy path: LLM request     →  Stage 2 Cache   →  Stage 3 Compress  →  LLM
+                              (skip if cached)
+```
+
+| Stage | What it does | When |
+|-------|--------------|------|
+| **1. Filter** | Strips noise from command output | `tp run` |
+| **2. Optimize** | BLAKE3 cache + prompt compression | `tp proxy` |
+| **3. Compress** | Caveman-style terse responses | `tp proxy`, `tp shrink` |
+
+---
+
+## Commands
+
+### Run & read
+
+| Command | What it does |
+|---------|--------------|
+| `tp run <cmd>` | Run a command, print filtered output |
+| `tp read <file>` | Smart file read — signatures for large files, full content for small |
+| `tp rewrite "<cmd>"` | Preview how tp would wrap a compound command |
+
+```bash
+tp run git diff                    # changed lines only
+tp read src/main.rs                # key functions, not every line
+tp rewrite "cargo fmt && cargo test"
+# → tp run cargo fmt && tp run cargo test
+```
+
+### Compress text
+
+| Command | What it does |
+|---------|--------------|
+| `tp shrink` | Compress stdin (auto mode) |
+| `tp shrink lite` | Remove filler, keep sentences |
+| `tp shrink full` | Drop articles, use fragments (default) |
+| `tp shrink ultra` | Maximum brevity |
 
 ```bash
 echo "Sure! I'd be happy to help..." | tp shrink
-# → removes filler, keeps substance
-
-cat verbose_log.txt | tp shrink ultra
-# → maximum compression
 ```
 
-### Proxy Mode — optimize LLM API calls
+### Proxy (LLM API)
 
 ```bash
-# Start the proxy
-tp proxy --port 8080 --upstream http://your-llm:8000
-
-# Point your tool to the proxy
+tp proxy --port 8080 --upstream https://api.openai.com
 export OPENAI_BASE_URL=http://localhost:8080/v1
 ```
 
-The proxy:
-1. Compresses input prompts (removes filler)
-2. Injects terse-response system prompt
-3. Caches responses (BLAKE3 hash)
-4. Compresses LLM output (Caveman-style)
+| Endpoint | Purpose |
+|----------|---------|
+| `POST /v1/chat/completions` | Full pipeline: cache → compress prompt → compress response |
+| `GET /v1/models` | Pass-through to upstream |
+| `GET /health` | Status + cache stats |
+| `GET /v1/stats` | Detailed savings analytics |
+| `POST /v1/cache/clear` | Clear response cache |
 
-### Statistics
+Local LLMs (private IP like `http://10.x.x.x:8000`) skip prompt compression automatically.
+
+### Analytics
+
+| Command | What it does |
+|---------|--------------|
+| `tp stats` | Quick savings summary |
+| `tp gain` | Per-category breakdown + cost estimates |
+| `tp discover` | Scan shell history for unoptimized commands |
+| `tp cache` | Show cache size; `tp cache clear` to reset |
+
+### Setup
+
+| Command | What it does |
+|---------|--------------|
+| `tp init auto` | Detect agents, install hooks for all |
+| `tp init hermes` | Hermes Agent |
+| `tp init claude` | Claude Code |
+| `tp init cursor` | Cursor |
+| `tp init codex` | Codex CLI |
+| `tp init copilot` | Copilot CLI |
+| `tp init bash` | PATH wrappers only |
+| `tp config init` | Create `~/.config/tp/config.toml` |
+
+---
+
+## Supported commands (~50 filters)
+
+tp has native filters for these. Anything else gets generic dedup + truncation.
+
+| Category | Commands |
+|----------|----------|
+| Git | `status`, `diff`, `log`, `show`, `branch`, `push`, `pull`, `commit`, … |
+| Build | `cargo`, `npm`, `pnpm`, `yarn`, `bun`, `make`, `cmake`, `dotnet`, `tsc` |
+| Test | `cargo test`, `pytest`, `jest`, `vitest`, `rspec`, `dotnet test` |
+| Files | `ls`, `find`, `fd`, `tree`, `cat`, `head`, `tail` |
+| Search | `grep`, `rg`, `ag` |
+| Containers | `docker`, `podman`, `kubectl`, `helm` |
+| Infra | `terraform`, `aws`, `gcloud` |
+| Other | `env`, `curl`, `wget`, `ps`, `df`, `gh`, `pip`, `python`, `node` |
+
+---
+
+## Configuration
+
+Create a config file:
 
 ```bash
-tp stats
-# Token Pipeline Stats
-# Commands:        5
-# Tokens saved:    1413 (87.1%)
+tp config init
 ```
 
-## Architecture
+Edit `~/.config/tp/config.toml`:
 
+```toml
+# Upstream LLM for tp proxy
+upstream_url = "https://api.openai.com"
+
+# Compression: lite | full | ultra
+compression_mode = "full"
+
+# Commands tp should NOT filter (run raw)
+exclude_commands = ["ssh", "vim"]
+
+# Response cache
+cache_ttl_secs = 3600
+cache_max_entries = 1000
 ```
-User/Agent → tp run <cmd> → execute → filter output → compressed result
-                                          ↑
-                                    Stage 1: Input Filter
-                                    (per-command rules)
 
-IDE/Agent → tp proxy :8080 → compress prompt → cache check → upstream LLM
-         ← compressed response ← cache store ← compress response ←
-                    ↑                                      ↑
-              Stage 3: Output                        Stage 2: Optimize
-              (Caveman compress)                     (BLAKE3 cache)
-```
+CLI flags override config values.
 
-## Integration with AI Tools
+---
 
-### Hermes Agent / Claude Code / Codex
-Copy the appropriate config from `configs/`:
+## Agent integration
+
+tp works with 5 AI coding agents. One command sets up everything:
+
 ```bash
-cp configs/hermes-AGENTS.md  /your-project/AGENTS.md
-cp configs/claude-CLAUDE.md  /your-project/CLAUDE.md
-cp configs/cursor-rules.md   /your-project/.cursor/rules/tp.md
+tp init auto
 ```
 
-### IDE Proxy (VS Code, Cursor, etc.)
-1. Start: `tp proxy --port 8080 --upstream http://your-llm:8000`
-2. Set your IDE's API base URL to `http://localhost:8080`
-3. Every LLM call automatically gets optimized
+This detects installed agents, installs PATH wrappers, and writes agent-specific config files:
 
-## Compression Modes
+| Agent | Config file created |
+|-------|---------------------|
+| Hermes | `AGENTS.md` (merged) |
+| Claude Code | `CLAUDE.md` |
+| Cursor | `.cursor/rules/tp.md` |
+| Codex CLI | `codex_instructions.md` |
+| Copilot CLI | `.github/copilot-instructions.md` |
 
-| Mode | What it does | Savings |
-|------|-------------|---------|
-| `lite` | Remove filler/hedging, keep full sentences | 10-20% |
-| `full` | Drop articles, use fragments, short words | 20-40% |
-| `ultra` | Maximum compression, telegraphic style | 30-50% |
+**Bypass tp** when you need raw output: use the full path (`/usr/bin/git status`).
 
-## Safety Guarantees
+---
 
-What tp **NEVER** modifies:
-- Exit codes
-- Error messages and stack traces
-- Code blocks
-- File paths and URLs
-- Command syntax
-- Technical terms
-- Numbers and versions
+## Examples
 
-## Documentation
+**Before / after — git status:**
 
-- `HOW_FILTERS_WORK_TH.md` — หลักการ filter สำหรับ Junior Dev (ภาษาไทย)
-- `configs/` — Integration configs for each AI tool
+```
+# Without tp (~180 tokens)
+On branch main
+Your branch is up to date with 'origin/main'.
+nothing to commit, working tree clean
 
-## Inspired By
+# With tp (~5 tokens)
+[main] clean
+```
 
-- [RTK](https://github.com/rtk-ai/rtk) — CLI proxy for token reduction
-- [KatGPT-RS](https://github.com/nickarls/katgpt-rs) — Neuro-symbolic optimization
-- [Caveman](https://github.com/JuliusBrussee/caveman) — Output token compression
+**Before / after — cargo test (all pass):**
+
+```
+# Without tp (~400 tokens)
+running 42 tests
+test foo ... ok
+test bar ... ok
+... (40 more lines)
+
+# With tp (~8 tokens)
+ok test result: ok. 42 passed; 0 failed
+```
+
+**Proxy with local LLM:**
+
+```bash
+tp proxy --port 8080 --upstream http://10.7.55.64:8000
+# Detects private IP → skips prompt compression (local = free tokens)
+```
+
+---
+
+## Project layout
+
+```
+token-pipeline/
+├── src/
+│   ├── main.rs           # CLI entry point
+│   ├── input_filter.rs   # Stage 1: command output filters
+│   ├── optimizer.rs      # Stage 2: BLAKE3 cache + prompt compress
+│   ├── output_compress.rs # Stage 3: Caveman compression
+│   ├── proxy.rs          # Async OpenAI-compatible proxy (axum)
+│   ├── rewrite.rs        # Compound command rewriter
+│   ├── read.rs           # tp read meta-command
+│   ├── config.rs         # ~/.config/tp/config.toml
+│   └── hook.rs           # tp init agent setup
+├── configs/              # Agent instruction templates
+├── tests/                # Integration tests
+└── install.sh            # One-line installer
+```
+
+---
+
+## Docs
+
+| File | Description |
+|------|-------------|
+| [HOW_FILTERS_WORK_TH.md](./HOW_FILTERS_WORK_TH.md) | Filter principles explained (Thai, for junior devs) |
+| [CHANGELOG.md](./CHANGELOG.md) | Release history |
+| [MIGRATION.md](./MIGRATION.md) | Upgrade guide from 0.x |
+
+---
+
+## Development
+
+```bash
+cargo test          # 67 tests (unit + integration)
+cargo build --release
+./target/release/tp --version
+```
+
+---
+
+## License
+
+MIT

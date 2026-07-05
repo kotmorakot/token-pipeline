@@ -1,24 +1,23 @@
 ---
-description: Token optimization with tp CLI
-globs: ["**/*"]
-alwaysApply: true
+description: Token Pipeline CLI optimization rules
+globs: ["*"]
 ---
 
-# Token Pipeline
+# tp (token-pipeline) v0.2.0
 
-When executing shell commands, prefer `tp run <command>` to compress output and reduce context window usage.
+When executing shell commands in the terminal, prefix with `tp run` for automatic output filtering:
 
-## Auto-filtered commands:
-- `tp run git status|diff|log` — compact git output
-- `tp run cargo test|build` — failures/errors only  
-- `tp run ls|find|tree` — compact listings
-- `tp run grep|rg` — grouped results
+```bash
+tp run git status
+tp run cargo test
+tp run dotnet build
+```
 
-## Text compression:
-- `cat large_file | tp shrink` — compress verbose text
+For reading files into context, use `tp read`:
+```bash
+tp read src/main.rs
+```
 
-## Safety:
-- Exit codes preserved exactly
-- Error messages never suppressed
-- Code blocks never modified
-- Paths and URLs exact
+For compressing verbose text: `echo "text" | tp shrink`
+
+tp preserves exit codes, errors, and code exactly. Only formatting noise is removed.

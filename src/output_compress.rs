@@ -347,3 +347,94 @@ fn collapse_whitespace(text: &str) -> String {
 
     result
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_compress_lite_removes_fillers() {
+        let text = "I think this is basically a just really good solution.";
+        let result = compress_lite(text);
+        assert!(!result.contains("basically"));
+        assert!(!result.contains("just "));
+        assert!(!result.contains("really "));
+        assert!(!result.contains("I think "));
+    }
+
+    #[test]
+    fn test_compress_full_removes_articles() {
+        let text = "The quick brown fox jumps over a lazy dog in the park.";
+        let result = compress_full(text);
+        assert!(!result.contains("The "));
+        assert!(!result.contains(" a "));
+        assert!(!result.contains(" the "));
+    }
+
+    #[test]
+    fn test_compress_ultra_aggressive() {
+        let text = "This is a very long and complicated explanation that we need to understand.";
+        let result = compress_ultra(text);
+        assert!(result.len() < text.len());
+    }
+
+    #[test]
+    fn test_code_block_preserved() {
+        let text = "Here is code:\n```rust\nfn main() {\n    println!(\"hello\");\n}\n```\nThat was basically the solution.";
+        let result = compress_text(text, "full");
+        assert!(result.contains("fn main()"));
+        assert!(result.contains("println!(\"hello\")"));
+        assert!(result.contains("```rust"));
+    }
+
+    #[test]
+    fn test_empty_input() {
+        assert_eq!(compress_text("", "lite"), "");
+        assert_eq!(compress_text("", "full"), "");
+        assert_eq!(compress_text("", "ultra"), "");
+    }
+
+    #[test]
+    fn test_only_code_blocks() {
+        let text = "```python\nprint('hello')\n```\n```bash\necho hi\n```\n";
+        let result = compress_text(text, "full");
+        assert!(result.contains("print('hello')"));
+        assert!(result.contains("echo hi"));
+    }
+
+    #[test]
+    fn test_mixed_prose_and_code() {
+        let text = "Sure! Here's the solution:\n\n```rust\nlet x = 42;\n```\n\nI think this should work.\n";
+        let result = compress_text(text, "lite");
+        assert!(result.contains("let x = 42;"));
+        assert!(!result.contains("Sure!"));
+    }
+
+    #[test]
+    fn test_caveman_system_prompt() {
+        let lite = caveman_system_prompt("lite");
+        let full = caveman_system_prompt("full");
+        let ultra = caveman_system_prompt("ultra");
+        assert!(lite.contains("concisely"));
+        assert!(full.contains("terse"));
+        assert!(ultra.contains("brevity"));
+    }
+
+    #[test]
+    fn test_protected_lines_preserved() {
+        let text = "Some prose here.\n$ cargo build\nerror[E0308]: mismatched types\nMore prose.\n";
+        let result = compress_text(text, "full");
+        assert!(result.contains("$ cargo build"));
+        assert!(result.contains("error[E0308]"));
+    }
+
+    #[test]
+    fn test_wordy_phrases_shortened() {
+        let text = "In order to fix this, due to the fact that it failed.";
+        let result = compress_lite(text);
+        assert!(result.contains("to fix"));
+        assert!(result.contains("because"));
+        assert!(!result.contains("In order to"));
+        assert!(!result.contains("due to the fact that"));
+    }
+}

@@ -1,10 +1,10 @@
-# Token Pipeline
+# tp (token-pipeline) v0.2.0
 
-Prefix shell commands with `tp run` to automatically compress output, reducing context window usage.
+When running shell commands, use `tp run` prefix for token-efficient output:
+- `tp run git status` — compact git output
+- `tp run cargo test` — test summary only
+- `tp run ls -la` — compact file listing
+- `tp read <file>` — smart file context extraction
+- `echo "text" | tp shrink` — compress verbose text
 
-- `tp run git status` → compact status
-- `tp run cargo test` → failures only
-- `tp run ls -la` → compact listing  
-- `cat file | tp shrink` → compress large text
-
-tp never modifies exit codes, errors, code blocks, or paths. Only formatting noise is removed.
+tp preserves exit codes, errors, and code exactly. Only formatting noise is removed.

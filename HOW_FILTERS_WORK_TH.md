@@ -1,10 +1,18 @@
 # หลักการทำงานของ Filter — ทำไมข้อมูลไม่พัง ไม่หาย
 
+> อัพเดต v1.0.0 — tp เป็น standalone เต็มรูปแบบ ไม่ต้องพึ่ง rtk อีกต่อไป
+
 ## สำหรับใคร
 เอกสารนี้สำหรับ Developer ที่อยากเข้าใจว่า "ระบบ filter" ทำงานยังไง ทำไมตัดข้อมูลออกแล้วเนื้อหาไม่เสียหาย พร้อมตัวอย่างจริงจากทั้ง 3 แนวทาง:
-- **RTK / Smart Proxy (SP)** — filter output ของ command ก่อนส่งให้ AI
+- **RTK (แนวคิดดั้งเดิม)** — filter output ของ command ก่อนส่งให้ AI
 - **Caveman** — สอน AI ให้ตอบสั้นลง ตัดคำเยิ่นเย้อ
-- **Token Pipeline (tp)** — รวมทั้ง 2 แนวทาง + เพิ่ม cache
+- **Token Pipeline (tp) v1.0.0** — รวมทั้ง 2 แนวทาง + cache + rewrite engine + async proxy
+
+## คำสั่งใหม่ใน v1.0.0
+- `tp read <file>` — อ่านไฟล์แบบ smart (ดึง signature จากไฟล์ใหญ่)
+- `tp rewrite <cmd>` — ดูว่า tp จะ rewrite compound command อย่างไร
+- `tp init auto` — auto-detect agent ที่ติดตั้งแล้ว configure ให้ทั้งหมด
+- `tp config init` — สร้าง config file ที่ `~/.config/tp/config.toml`
 
 ---
 

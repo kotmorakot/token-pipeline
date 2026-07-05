@@ -1,5 +1,3 @@
-/// Token savings analytics — track how much tp saved you
-
 use std::fs;
 use std::path::PathBuf;
 
@@ -30,7 +28,9 @@ struct Record {
 fn stats_path() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
     let dir = PathBuf::from(&home).join(".local/share/token-pipeline");
-    fs::create_dir_all(&dir).ok();
+    if let Err(e) = fs::create_dir_all(&dir) {
+        eprintln!("tp: warning: cannot create stats dir: {}", e);
+    }
     dir.join("stats.json")
 }
 
@@ -44,8 +44,13 @@ fn load() -> Stats {
 
 fn save(stats: &Stats) {
     let path = stats_path();
-    if let Ok(json) = serde_json::to_string_pretty(stats) {
-        fs::write(path, json).ok();
+    match serde_json::to_string_pretty(stats) {
+        Ok(json) => {
+            if let Err(e) = fs::write(&path, json) {
+                eprintln!("tp: warning: failed to save stats: {}", e);
+            }
+        }
+        Err(e) => eprintln!("tp: warning: failed to serialize stats: {}", e),
     }
 }
 
@@ -63,7 +68,11 @@ pub fn record(kind: &str, cmd: &str, raw_tokens: u64, filtered_tokens: u64, time
     stats.total_filtered_tokens += filtered_tokens;
     stats.total_time_ms += time_ms;
 
-    let cmd_short: String = cmd.split_whitespace().take(3).collect::<Vec<&str>>().join(" ");
+    let cmd_short: String = cmd
+        .split_whitespace()
+        .take(3)
+        .collect::<Vec<&str>>()
+        .join(" ");
     stats.records.push(Record {
         kind: kind.to_string(),
         cmd: cmd_short,
@@ -117,10 +126,7 @@ pub fn show_stats() {
         println!("    Commands:        {}", stats.total_commands);
         println!("    Raw tokens:      {}", stats.total_raw_tokens);
         println!("    Filtered tokens: {}", stats.total_filtered_tokens);
-        println!(
-            "    Tokens saved:    {} ({:.1}%)",
-            saved, pct
-        );
+        println!("    Tokens saved:    {} ({:.1}%)", saved, pct);
         println!(
             "    Avg latency:     {:.1}ms/cmd",
             stats.total_time_ms as f64 / stats.total_commands as f64
@@ -150,10 +156,7 @@ pub fn show_stats() {
         ];
         for (model, rate) in &rates {
             let usd = total_saved as f64 / 1_000_000.0 * rate;
-            println!(
-                "    {} (${}/1M): ${:.4} saved",
-                model, rate, usd
-            );
+            println!("    {} (${}/1M): ${:.4} saved", model, rate, usd);
         }
     }
 

@@ -3,14 +3,20 @@ use std::io::{self, Read};
 use std::process::Command;
 use std::time::Instant;
 
+mod config;
+mod discover;
+mod error;
+mod gain;
+mod hook;
 mod input_filter;
 mod optimizer;
 mod output_compress;
 mod proxy;
+mod read;
+mod rewrite;
 mod stats;
-mod gain;
-mod hook;
-mod discover;
+
+const VERSION: &str = "1.0.0";
 
 fn main() {
     let raw_args: Vec<String> = env::args().skip(1).collect();
@@ -20,7 +26,6 @@ fn main() {
         return;
     }
 
-    // Parse global flags
     let mut ultra = false;
     let mut args = Vec::new();
     for a in &raw_args {
@@ -35,19 +40,22 @@ fn main() {
         return;
     }
 
+    let cfg = config::Config::load();
+
     match args[0].as_str() {
         "run" => {
             if args.len() < 2 {
                 eprintln!("Usage: tp run <command> [args...]");
                 std::process::exit(1);
             }
-            run_command(&args[1..], ultra);
+            run_command(&args[1..], ultra, &cfg);
         }
         "proxy" => {
             let port = parse_flag(&args, "--port").unwrap_or_else(|| "8080".to_string());
             let upstream = parse_flag(&args, "--upstream")
-                .unwrap_or_else(|| "http://10.7.55.64:8000".to_string());
-            let mode = parse_flag(&args, "--mode").unwrap_or_else(|| "full".to_string());
+                .or_else(|| cfg.upstream_url.clone())
+                .unwrap_or_else(|| "http://localhost:8000".to_string());
+            let mode = parse_flag(&args, "--mode").unwrap_or_else(|| cfg.compression_mode.clone());
             proxy::start_proxy(&port, &upstream, &mode);
         }
         "shrink" => {
@@ -55,12 +63,17 @@ fn main() {
             io::stdin().read_to_string(&mut input).unwrap_or_default();
             let mode = if args.len() > 1 {
                 let m = &args[1];
-                if m == "lite" || m == "full" || m == "ultra" { m.as_str() } else { "full" }
+                if m == "lite" || m == "full" || m == "ultra" {
+                    m.as_str()
+                } else {
+                    "full"
+                }
+            } else if input.len() > 5000 {
+                "ultra"
+            } else if input.len() > 1000 {
+                "full"
             } else {
-                // Auto-detect mode based on content length
-                if input.len() > 5000 { "ultra" }
-                else if input.len() > 1000 { "full" }
-                else { "lite" }
+                "lite"
             };
             let result = output_compress::compress_text(&input, mode);
             print!("{}", result);
@@ -68,7 +81,10 @@ fn main() {
             let out_len = result.len();
             if raw_len > 0 {
                 let pct = (raw_len - out_len) as f64 / raw_len as f64 * 100.0;
-                eprintln!("\x1b[2m[tp shrink: {} → {} chars ({:.0}% saved)]\x1b[0m", raw_len, out_len, pct);
+                eprintln!(
+                    "\x1b[2m[tp shrink: {} -> {} chars ({:.0}% saved)]\x1b[0m",
+                    raw_len, out_len, pct
+                );
             }
         }
         "stats" => stats::show_stats(),
@@ -86,122 +102,109 @@ fn main() {
             hook::install_hook(target);
         }
         "discover" => discover::show_discover(),
+        "read" => {
+            if args.len() < 2 {
+                eprintln!("Usage: tp read <file|dir>");
+                std::process::exit(1);
+            }
+            let result = read::read_file(&args[1]);
+            print!("{}", result);
+        }
+        "rewrite" => {
+            if args.len() < 2 {
+                eprintln!("Usage: tp rewrite <command string>");
+                std::process::exit(1);
+            }
+            let cmd_str = args[1..].join(" ");
+            let rewritten = rewrite::rewrite_command(&cmd_str, &cfg);
+            println!("{}", rewritten);
+        }
+        "config" => {
+            if args.get(1).map(|s| s.as_str()) == Some("init") {
+                config::write_default_config();
+            } else {
+                println!("Config: {:?}", cfg);
+                println!("\nUse `tp config init` to create default config.");
+            }
+        }
         "--help" | "-h" | "help" => print_help(),
-        "--version" | "-V" => println!("tp (token-pipeline) v0.1.0"),
-        _ => run_command(&args, ultra),
+        "--version" | "-V" => println!("tp (token-pipeline) v{}", VERSION),
+        _ => run_command(&args, ultra, &cfg),
     }
 }
 
-fn run_command(args: &[String], ultra: bool) {
+fn run_command(args: &[String], ultra: bool, cfg: &config::Config) {
     let start = Instant::now();
     let (cmd, cmd_args) = (args[0].as_str(), &args[1..]);
     let full_cmd = args.join(" ");
 
-    // Check if tp has a specific filter, otherwise fallback to rtk
-    let use_rtk = !ultra && !input_filter::is_known_command(cmd);
+    if cfg.is_excluded(cmd) {
+        let mut command = Command::new(cmd);
+        command.args(cmd_args);
+        strip_tp_from_path(&mut command);
+        match command.status() {
+            Ok(status) => std::process::exit(status.code().unwrap_or(0)),
+            Err(e) => {
+                eprintln!("tp: failed to execute '{}': {}", cmd, e);
+                std::process::exit(127);
+            }
+        }
+    }
 
-    let executor = if use_rtk { "rtk" } else { cmd };
-    let exec_args: &[String] = if use_rtk { &args } else { cmd_args };
+    let mut command = Command::new(cmd);
+    command.args(cmd_args);
+    strip_tp_from_path(&mut command);
 
-    let mut command = Command::new(executor);
-    command.args(exec_args);
+    match command.output() {
+        Ok(out) => {
+            let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+            let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+            let raw = format!("{}{}", stdout, stderr);
+            let exit_code = out.status.code().unwrap_or(-1);
 
-    // Strip tp-hooks from PATH to avoid wrapper recursion
+            let filtered =
+                input_filter::apply_with_ultra(&full_cmd, &stdout, &stderr, exit_code, ultra);
+            print!("{}", filtered);
+
+            let elapsed = start.elapsed();
+            let raw_tokens = estimate_tokens(&raw);
+            let filtered_tokens = estimate_tokens(&filtered);
+            stats::record(
+                "run",
+                &full_cmd,
+                raw_tokens,
+                filtered_tokens,
+                elapsed.as_millis() as u64,
+            );
+
+            let savings = raw.len().saturating_sub(filtered.len());
+            if savings > 10 {
+                let pct = savings as f64 / raw.len() as f64 * 100.0;
+                eprintln!(
+                    "\x1b[2m[tp: {} -> {} chars ({:.0}% saved) {:.0}ms]\x1b[0m",
+                    raw.len(),
+                    filtered.len(),
+                    pct,
+                    elapsed.as_millis()
+                );
+            }
+
+            std::process::exit(out.status.code().unwrap_or(0));
+        }
+        Err(e) => {
+            eprintln!("tp: failed to execute '{}': {}", cmd, e);
+            std::process::exit(127);
+        }
+    }
+}
+
+fn strip_tp_from_path(command: &mut Command) {
     if let Ok(path) = std::env::var("PATH") {
         let clean_path: Vec<&str> = path
             .split(':')
             .filter(|p| !p.contains("tp-hooks") && !p.contains("token-pipeline"))
             .collect();
         command.env("PATH", clean_path.join(":"));
-    }
-
-    let output = command.output();
-
-    match output {
-        Ok(out) => {
-            let stdout = String::from_utf8_lossy(&out.stdout).to_string();
-            let stderr = String::from_utf8_lossy(&out.stderr).to_string();
-            let raw = format!("{}{}", stdout, stderr);
-
-            if use_rtk {
-                // rtk already filtered output, print as-is
-                print!("{}{}", stdout, stderr);
-                let elapsed = start.elapsed();
-                let raw_tokens = estimate_tokens(&raw);
-                stats::record(
-                    "run",
-                    &full_cmd,
-                    raw_tokens,
-                    raw_tokens,
-                    elapsed.as_millis() as u64,
-                );
-                eprintln!(
-                    "\x1b[2m[tp→rtk: {} chars, {:.0}ms]\x1b[0m",
-                    raw.len(),
-                    elapsed.as_millis()
-                );
-            } else {
-                // Apply tp's own filter
-                let filtered = input_filter::apply_with_ultra(
-                    &full_cmd,
-                    &stdout,
-                    &stderr,
-                    out.status.code().unwrap_or(-1),
-                    ultra,
-                );
-                print!("{}", filtered);
-                let elapsed = start.elapsed();
-                let raw_tokens = estimate_tokens(&raw);
-                let filtered_tokens = estimate_tokens(&filtered);
-                stats::record(
-                    "run",
-                    &full_cmd,
-                    raw_tokens,
-                    filtered_tokens,
-                    elapsed.as_millis() as u64,
-                );
-                let savings = raw.len().saturating_sub(filtered.len());
-                if savings > 10 {
-                    let pct = savings as f64 / raw.len() as f64 * 100.0;
-                    eprintln!(
-                        "\x1b[2m[tp: {} → {} chars ({:.0}% saved) {:.0}ms]\x1b[0m",
-                        raw.len(),
-                        filtered.len(),
-                        pct,
-                        elapsed.as_millis()
-                    );
-                }
-            }
-
-            std::process::exit(out.status.code().unwrap_or(0));
-        }
-        Err(e) => {
-            let name = if use_rtk { "rtk" } else { cmd };
-            eprintln!("tp: failed to execute '{}': {}", name, e);
-            // Last resort: run original command directly
-            if use_rtk {
-                let mut fallback = Command::new(cmd);
-                fallback.args(cmd_args);
-                if let Ok(path) = std::env::var("PATH") {
-                    let clean_path: Vec<&str> = path
-                        .split(':')
-                        .filter(|p| !p.contains("tp-hooks") && !p.contains("token-pipeline"))
-                        .collect();
-                    fallback.env("PATH", clean_path.join(":"));
-                }
-                match fallback.output() {
-                    Ok(out) => {
-                        let so = String::from_utf8_lossy(&out.stdout).to_string();
-                        let se = String::from_utf8_lossy(&out.stderr).to_string();
-                        print!("{}{}", so, se);
-                        std::process::exit(out.status.code().unwrap_or(0));
-                    }
-                    Err(_) => std::process::exit(127),
-                }
-            } else {
-                std::process::exit(127);
-            }
-        }
     }
 }
 
@@ -219,45 +222,50 @@ fn parse_flag(args: &[String], flag: &str) -> Option<String> {
 fn print_help() {
     println!(
         r#"
-tp (token-pipeline) v0.1.0
-Full pipeline: RTK filter → KatGPT-RS optimize → Caveman compress
+tp (token-pipeline) v{version}
+CLI output filter + LLM proxy optimizer — replaces rtk + caveman
 
 USAGE:
-  tp [FLAGS] run <command> [args...]     Run command with output compression
+  tp [FLAGS] run <command> [args...]     Run command with output filtering
   tp proxy [options]                     Start OpenAI-compatible optimization proxy
   tp shrink [MODE]                       Compress stdin text (lite|full|ultra)
-  tp stats                               Show token savings statistics
+  tp stats                               Show token savings summary
   tp gain                                Detailed token savings analytics
   tp discover                            Find missed savings opportunities
   tp cache [clear]                       Show/clear response cache
-  tp init [target]                       Install auto-hooks (bash|hermes)
+  tp read <file|dir>                      Smart file reading for LLM context
+  tp rewrite <cmd>                       Show tp-rewritten version of a command
+  tp init [target]                       Install auto-hooks (bash|hermes|cursor|claude|codex|copilot)
+  tp config [init]                       Show config / create default config
   tp help                                Show this help
 
 FLAGS:
-  -u, --ultra-compact    Maximum compression (extension counts, telegraphic format)
+  -u, --ultra-compact    Maximum compression (extension counts, telegraphic)
 
 PROXY OPTIONS:
   --port PORT        Listen port (default: 8080)
-  --upstream URL     Upstream LLM API (default: http://10.7.55.64:8000)
+  --upstream URL     Upstream LLM API (from config or default)
   --mode MODE        Compression: lite|full|ultra (default: full)
 
 EXAMPLES:
   tp run git status              Compact git status
   tp run git diff                Changed lines only
   tp run cargo test              Failures summary
-  tp run ls -la                  Compact listing
-  tp -u run ls -la               Ultra-compact (file counts by extension)
+  tp run dotnet test             .NET test summary
+  tp -u run ls -la               Ultra-compact listing
 
   tp proxy --port 8080           Start proxy server
   echo "verbose text" | tp shrink   Compress any text
 
-GLOBAL FLAGS:
-  -u, --ultra-compact    Extra compression on ls, git status, etc.
+CONFIG:
+  ~/.config/tp/config.toml       Global settings
+  tp config init                 Create default config file
 
 PIPELINE STAGES:
-  1. Input   — RTK-style command output filtering (remove noise)
-  2. Optimize — BLAKE3 cache + constraint validation
+  1. Input   — command output filtering (remove noise, keep signal)
+  2. Optimize — BLAKE3 cache + prompt compression
   3. Output  — Caveman-style response compression (terse prose)
-"#
+"#,
+        version = VERSION
     );
 }

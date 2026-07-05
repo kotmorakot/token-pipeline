@@ -1,12 +1,9 @@
-# Token Pipeline
+# tp (token-pipeline) v0.2.0
 
-Use `tp run <command>` for shell commands to compress output and save tokens.
-Use `tp shrink` to compress large text inputs via stdin pipe.
+Prefix shell commands with `tp run` to reduce token usage:
+- `tp run git status` instead of `git status`
+- `tp run cargo test` instead of `cargo test`
+- `tp read <file>` for smart file context extraction
+- `echo "text" | tp shrink` to compress verbose output
 
-Examples:
-  tp run git status → compact git status  
-  tp run cargo test → failures summary only
-  cat file.rs | tp shrink → key parts only
-
-tp preserves: exit codes, errors, code blocks, paths, URLs.
-tp removes: formatting noise, duplicate lines, verbose decorations.
+tp preserves exit codes, errors, and code exactly. Only noise is removed.

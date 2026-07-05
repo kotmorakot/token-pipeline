@@ -1,8 +1,8 @@
 [package]
 name = "token-pipeline"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2021"
-description = "Full token optimization pipeline: RTK filter → KatGPT-RS optimize → Caveman compress"
+description = "CLI output filter + LLM proxy optimizer — replaces rtk + caveman"
 
 [[bin]]
 name = "tp"
@@ -12,6 +12,13 @@ path = "src/main.rs"
 blake3 = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-reqwest = { version = "0.12", features = ["blocking", "json", "rustls-tls"], default-features = false }
-tiny_http = "0.12"
+reqwest = { version = "0.12", features = ["json", "rustls-tls", "stream"], default-features = false }
 regex = "1"
+axum = "0.8"
+tokio = { version = "1", features = ["full"] }
+futures-util = "0.3"
+
+[dev-dependencies]
+assert_cmd = "2"
+predicates = "3"
+tempfile = "3"

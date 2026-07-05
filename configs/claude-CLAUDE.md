@@ -1,30 +1,33 @@
-# Token Pipeline Integration
+# tp (token-pipeline) v0.2.0
 
 ## Shell Commands
-Prefix shell commands with `tp run` to compress output and save context window tokens.
-
+Always prefix shell commands with `tp run`:
 ```bash
-tp run git status      # compact status
-tp run git diff        # changed lines only
-tp run cargo test      # failures summary
-tp run ls -la          # compact listing
+tp run git status
+tp run cargo test
+tp run ls -la
+```
+
+## File Reading
+Use `tp read` for smart file context:
+```bash
+tp read src/main.rs       # extracts signatures from large files
+tp read configs/           # directory listing
 ```
 
 ## Text Compression
-Pipe large text through `tp shrink`:
 ```bash
-cat verbose_output.log | tp shrink
+cat file | tp shrink       # compress verbose text
 ```
 
 ## What tp Does
-- Removes formatting noise from command output
-- Deduplicates repeated lines
-- Summarizes test/build results (shows failures only when all pass)
-- Masks sensitive env vars
-- Never modifies: exit codes, errors, code, paths, URLs
+- Filters command output to reduce tokens (removes noise, keeps signal)
+- Preserves exit codes, errors, code blocks, paths exactly
+- Only compresses formatting, duplicates, and boilerplate
 
-## What tp Does NOT Do
-- Does not change command behavior
-- Does not suppress errors
-- Does not modify code content
-- Does not alter exit codes
+## Available Commands
+- `tp run <cmd>` — run with output filtering
+- `tp read <file>` — smart file reading
+- `tp shrink [mode]` — compress stdin (lite|full|ultra)
+- `tp stats` / `tp gain` — savings analytics
+- `tp discover` — find unoptimized commands
