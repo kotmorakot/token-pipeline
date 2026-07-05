@@ -1,11 +1,15 @@
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 pub fn read_file(path: &str) -> String {
     let p = Path::new(path);
 
     if !p.exists() {
         return format!("error: file not found: {}\n", path);
+    }
+
+    if let Err(msg) = check_path_safety(p) {
+        return format!("error: {}\n", msg);
     }
 
     let metadata = match fs::metadata(p) {
@@ -40,6 +44,8 @@ pub fn read_file(path: &str) -> String {
         }
     };
 
+    let content = redact_sensitive_values(&content, ext);
+
     let lines: Vec<&str> = content.lines().collect();
     let filename = p.file_name().and_then(|n| n.to_str()).unwrap_or(path);
 
@@ -56,6 +62,69 @@ pub fn read_file(path: &str) -> String {
     }
 
     format_large_file(filename, &lines)
+}
+
+fn check_path_safety(p: &Path) -> Result<(), String> {
+    let canonical = match fs::canonicalize(p) {
+        Ok(c) => c,
+        Err(e) => return Err(format!("cannot resolve {}: {}", p.display(), e)),
+    };
+
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let canonical_cwd = fs::canonicalize(&cwd).unwrap_or(cwd);
+
+    if canonical.starts_with(&canonical_cwd) {
+        return Ok(());
+    }
+
+    let home = std::env::var("HOME")
+        .map(PathBuf::from)
+        .ok()
+        .and_then(|h| fs::canonicalize(h).ok());
+
+    if let Some(home_dir) = home {
+        if canonical.starts_with(&home_dir) {
+            return Ok(());
+        }
+    }
+
+    let tmp = fs::canonicalize("/tmp").unwrap_or_else(|_| PathBuf::from("/tmp"));
+    if canonical.starts_with(&tmp) {
+        return Ok(());
+    }
+
+    let sensitive_paths = ["/etc/shadow", "/etc/passwd", "/etc/sudoers"];
+    for sp in &sensitive_paths {
+        if canonical == PathBuf::from(sp) {
+            return Err(format!("access denied: {} is a sensitive system file", canonical.display()));
+        }
+    }
+
+    if !canonical.starts_with("/home") && !canonical.starts_with(&tmp) {
+        return Err(format!(
+            "access denied: {} is outside the project directory",
+            canonical.display()
+        ));
+    }
+
+    Ok(())
+}
+
+fn redact_sensitive_values(content: &str, ext: &str) -> String {
+    if !matches!(ext.to_lowercase().as_str(), "env" | "ini" | "cfg" | "conf" | "properties" | "toml" | "yaml" | "yml") {
+        return content.to_string();
+    }
+
+    let sensitive = ["SECRET", "TOKEN", "PASSWORD", "CREDENTIAL", "PRIVATE", "API_KEY"];
+    content.lines().map(|line| {
+        if let Some((key, _val)) = line.split_once('=') {
+            let k = key.trim().to_uppercase();
+            if sensitive.iter().any(|p| k.contains(p)) || (k.ends_with("_KEY") && k != "TERM_SESSION_KEY") {
+                return format!("{}=***", key.trim());
+            }
+        }
+        line.to_string()
+    }).collect::<Vec<_>>().join("\n")
 }
 
 fn read_directory(path: &str) -> String {

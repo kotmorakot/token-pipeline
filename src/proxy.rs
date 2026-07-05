@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::net::IpAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -66,9 +67,11 @@ pub struct Usage {
 
 struct ProxyState {
     cache: Mutex<ResponseCache>,
+    in_flight: Mutex<HashSet<String>>,
     client: reqwest::Client,
     upstream: String,
     mode: String,
+    admin_token: Option<String>,
     request_count: AtomicU64,
     total_input_tokens: AtomicU64,
     total_output_tokens: AtomicU64,
@@ -78,17 +81,19 @@ struct ProxyState {
 }
 
 impl ProxyState {
-    fn new(upstream: String, mode: String) -> Self {
+    fn new(upstream: String, mode: String, cache_ttl: u64, cache_max: usize, admin_token: Option<String>) -> Self {
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(300))
             .build()
             .expect("Failed to create HTTP client");
 
         Self {
-            cache: Mutex::new(ResponseCache::new()),
+            cache: Mutex::new(ResponseCache::with_limits(cache_ttl, cache_max)),
+            in_flight: Mutex::new(HashSet::new()),
             client,
             upstream,
             mode,
+            admin_token,
             request_count: AtomicU64::new(0),
             total_input_tokens: AtomicU64::new(0),
             total_output_tokens: AtomicU64::new(0),
@@ -142,32 +147,50 @@ fn is_private_url(url: &str) -> bool {
     }
 }
 
-pub fn start_proxy(port: &str, upstream: &str, mode: &str) {
-    let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
-    rt.block_on(run_server(port, upstream, mode));
+pub struct ProxyConfig {
+    pub port: String,
+    pub bind: String,
+    pub upstream: String,
+    pub mode: String,
+    pub cache_ttl: u64,
+    pub cache_max: usize,
+    pub admin_token: Option<String>,
 }
 
-async fn run_server(port: &str, upstream: &str, mode: &str) {
-    let addr = format!("0.0.0.0:{}", port);
-    let state = Arc::new(ProxyState::new(upstream.to_string(), mode.to_string()));
+pub fn start_proxy(cfg: &ProxyConfig) {
+    let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
+    rt.block_on(run_server(cfg));
+}
 
+async fn run_server(cfg: &ProxyConfig) {
+    let addr = format!("{}:{}", cfg.bind, cfg.port);
+    let state = Arc::new(ProxyState::new(
+        cfg.upstream.clone(),
+        cfg.mode.clone(),
+        cfg.cache_ttl,
+        cfg.cache_max,
+        cfg.admin_token.clone(),
+    ));
+
+    let is_local = is_private_url(&cfg.upstream);
     println!();
     println!("  Token Pipeline Proxy v{}", VERSION);
     println!("  {}", "=".repeat(45));
-    println!("  Listen:     http://localhost:{}", port);
-    println!("  Upstream:   {}", upstream);
-    println!("  Compress:   {} mode", mode);
-    println!("  Local LLM:  {}", if is_private_url(upstream) { "yes (skip prompt compress)" } else { "no (full optimization)" });
+    println!("  Listen:     http://{}:{}", cfg.bind, cfg.port);
+    println!("  Upstream:   {}", cfg.upstream);
+    println!("  Compress:   {} mode", cfg.mode);
+    println!("  Local LLM:  {}", if is_local { "yes (skip prompt compress)" } else { "no (full optimization)" });
+    println!("  Admin auth: {}", if cfg.admin_token.is_some() { "enabled" } else { "none (admin open)" });
     println!();
     println!("  Endpoints:");
     println!("    POST /v1/chat/completions  optimized (cache + compress)");
     println!("    GET  /v1/models            pass-through");
     println!("    GET  /health               proxy stats");
     println!("    GET  /v1/stats             detailed analytics");
-    println!("    POST /v1/cache/clear       clear response cache");
+    println!("    POST /v1/cache/clear       clear response cache (admin)");
     println!();
     println!("  Configure your tool:");
-    println!("    export OPENAI_BASE_URL=http://localhost:{}/v1", port);
+    println!("    export OPENAI_BASE_URL=http://localhost:{}/v1", cfg.port);
     println!();
     println!("  Ctrl+C to stop");
     println!();
@@ -236,7 +259,7 @@ async fn handle_chat(
     }
 
     let messages_json = serde_json::to_string(&chat_req.messages).unwrap_or_default();
-    let cache_key = ResponseCache::cache_key(&messages_json, &chat_req.model);
+    let cache_key = ResponseCache::cache_key_with_mode(&messages_json, &chat_req.model, &state.mode);
 
     {
         let mut cache = state.cache.lock().unwrap();
@@ -246,6 +269,23 @@ async fn handle_chat(
             stats::record_proxy(cached.completion_tokens as u64, 0, true);
             let response_body = build_cached_response(cached, &chat_req.model);
             return json_response(200, &response_body);
+        }
+    }
+
+    let already_in_flight = {
+        let mut flight = state.in_flight.lock().unwrap();
+        !flight.insert(cache_key.clone())
+    };
+    if already_in_flight {
+        eprintln!("  [#{}] duplicate in-flight, waiting for first to finish", req_num);
+        for _ in 0..60 {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let mut cache = state.cache.lock().unwrap();
+            if let Some(cached) = cache.get(&cache_key) {
+                state.total_cache_hits.fetch_add(1, Ordering::SeqCst);
+                stats::record_proxy(cached.completion_tokens as u64, 0, true);
+                return json_response(200, &build_cached_response(cached, &chat_req.model));
+            }
         }
     }
 
@@ -270,7 +310,10 @@ async fn handle_chat(
 
     let optimized_body = match serde_json::to_string(&chat_req) {
         Ok(b) => b,
-        Err(e) => return error_response(500, &format!("Serialization error: {}", e)),
+        Err(e) => {
+            state.in_flight.lock().unwrap().remove(&cache_key);
+            return error_response(500, &format!("Serialization error: {}", e));
+        }
     };
 
     let upstream_url = format!("{}/v1/chat/completions", state.upstream.trim_end_matches('/'));
@@ -286,7 +329,7 @@ async fn handle_chat(
     }
 
     let start_time = SystemTime::now();
-    match req_builder.send().await {
+    let result = match req_builder.send().await {
         Ok(resp) => {
             let elapsed = start_time.elapsed().unwrap_or_default().as_millis();
             let status = resp.status().as_u16();
@@ -299,17 +342,18 @@ async fn handle_chat(
 
             let mut chat_resp: ChatResponse = match serde_json::from_str(&resp_body) {
                 Ok(r) => r,
-                Err(_) => return json_response(200, &resp_body),
+                Err(_) => {
+                    state.in_flight.lock().unwrap().remove(&cache_key);
+                    return json_response(200, &resp_body);
+                }
             };
 
             let original_tokens = chat_resp.usage.completion_tokens;
 
-            if !is_local {
-                for choice in &mut chat_resp.choices {
-                    if let Some(text) = choice.message.content.as_str() {
-                        let compressed = output_compress::compress_text(text, &state.mode);
-                        choice.message.content = serde_json::Value::String(compressed);
-                    }
+            for choice in &mut chat_resp.choices {
+                if let Some(text) = choice.message.content.as_str() {
+                    let compressed = output_compress::compress_text(text, &state.mode);
+                    choice.message.content = serde_json::Value::String(compressed);
                 }
             }
 
@@ -327,7 +371,7 @@ async fn handle_chat(
 
             {
                 let mut cache = state.cache.lock().unwrap();
-                cache.put(cache_key, CachedResponse {
+                cache.put(cache_key.clone(), CachedResponse {
                     content: compressed_content,
                     model: chat_req.model.clone(),
                     prompt_tokens: chat_resp.usage.prompt_tokens,
@@ -351,7 +395,9 @@ async fn handle_chat(
             eprintln!("  [#{}] upstream failed: {}", req_num, e);
             error_response(502, &format!("Upstream error: {}", e))
         }
-    }
+    };
+    state.in_flight.lock().unwrap().remove(&cache_key);
+    result
 }
 
 async fn handle_stream(
@@ -366,10 +412,21 @@ async fn handle_stream(
     let upstream_url = format!("{}/v1/chat/completions", state.upstream.trim_end_matches('/'));
     let auth = extract_auth(headers);
 
+    let send_body = if !is_local {
+        if let Ok(mut chat_req) = serde_json::from_str::<ChatRequest>(body) {
+            optimize_messages(&mut chat_req.messages, &state.mode);
+            serde_json::to_string(&chat_req).unwrap_or_else(|_| body.to_string())
+        } else {
+            body.to_string()
+        }
+    } else {
+        body.to_string()
+    };
+
     let mut req_builder = state.client
         .post(&upstream_url)
         .header("Content-Type", "application/json")
-        .body(body.to_string());
+        .body(send_body);
 
     if let Some(auth_val) = auth {
         req_builder = req_builder.header("Authorization", auth_val);
@@ -384,18 +441,6 @@ async fn handle_stream(
             }
 
             let stream = resp.bytes_stream();
-
-            if is_local {
-                let body = Body::from_stream(stream);
-                return Response::builder()
-                    .status(200)
-                    .header("Content-Type", "text/event-stream")
-                    .header("Cache-Control", "no-cache")
-                    .header("Connection", "keep-alive")
-                    .body(body)
-                    .unwrap();
-            }
-
             let mode = state.mode.clone();
             let compressed_stream = stream.map(move |chunk| {
                 match chunk {
@@ -552,14 +597,28 @@ async fn handle_detailed_stats(State(state): State<Arc<ProxyState>>) -> Json<ser
     }))
 }
 
-async fn handle_cache_clear(State(state): State<Arc<ProxyState>>) -> Json<serde_json::Value> {
+async fn handle_cache_clear(
+    State(state): State<Arc<ProxyState>>,
+    headers: HeaderMap,
+) -> Response {
+    if let Some(ref expected) = state.admin_token {
+        let provided = extract_auth(&headers)
+            .map(|a| a.trim_start_matches("Bearer ").to_string());
+        if provided.as_deref() != Some(expected.as_str()) {
+            return json_response(403, r#"{"error":"forbidden: invalid or missing admin token"}"#);
+        }
+    }
+
     {
         let mut cache = state.cache.lock().unwrap();
-        *cache = ResponseCache::new();
+        *cache = ResponseCache::with_limits(
+            cache.ttl_secs,
+            cache.max_entries,
+        );
     }
     optimizer::clear_disk_cache();
     eprintln!("  Cache cleared");
-    Json(serde_json::json!({"status": "ok", "message": "Cache cleared"}))
+    json_response(200, r#"{"status":"ok","message":"Cache cleared"}"#)
 }
 
 fn optimize_messages(messages: &mut Vec<Message>, mode: &str) {

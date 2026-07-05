@@ -51,12 +51,19 @@ fn main() {
             run_command(&args[1..], ultra, &cfg);
         }
         "proxy" => {
-            let port = parse_flag(&args, "--port").unwrap_or_else(|| "8080".to_string());
-            let upstream = parse_flag(&args, "--upstream")
-                .or_else(|| cfg.upstream_url.clone())
-                .unwrap_or_else(|| "http://localhost:8000".to_string());
-            let mode = parse_flag(&args, "--mode").unwrap_or_else(|| cfg.compression_mode.clone());
-            proxy::start_proxy(&port, &upstream, &mode);
+            let proxy_cfg = proxy::ProxyConfig {
+                port: parse_flag(&args, "--port").unwrap_or_else(|| "8080".to_string()),
+                bind: parse_flag(&args, "--bind").unwrap_or_else(|| "127.0.0.1".to_string()),
+                upstream: parse_flag(&args, "--upstream")
+                    .or_else(|| cfg.upstream_url.clone())
+                    .unwrap_or_else(|| "http://localhost:8000".to_string()),
+                mode: parse_flag(&args, "--mode").unwrap_or_else(|| cfg.compression_mode.clone()),
+                cache_ttl: cfg.cache_ttl_secs,
+                cache_max: cfg.cache_max_entries,
+                admin_token: parse_flag(&args, "--admin-token")
+                    .or_else(|| std::env::var("TP_ADMIN_TOKEN").ok()),
+            };
+            proxy::start_proxy(&proxy_cfg);
         }
         "shrink" => {
             let mut input = String::new();
@@ -243,9 +250,11 @@ FLAGS:
   -u, --ultra-compact    Maximum compression (extension counts, telegraphic)
 
 PROXY OPTIONS:
-  --port PORT        Listen port (default: 8080)
-  --upstream URL     Upstream LLM API (from config or default)
-  --mode MODE        Compression: lite|full|ultra (default: full)
+  --port PORT           Listen port (default: 8080)
+  --bind ADDR           Bind address (default: 127.0.0.1)
+  --upstream URL        Upstream LLM API (from config or default)
+  --mode MODE           Compression: lite|full|ultra (default: full)
+  --admin-token TOKEN   Require token for admin endpoints (or TP_ADMIN_TOKEN env)
 
 EXAMPLES:
   tp run git status              Compact git status

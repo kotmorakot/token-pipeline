@@ -19,11 +19,12 @@ pub struct ResponseCache {
     access_order: Vec<String>,
     pub hits: u64,
     pub misses: u64,
-    ttl_secs: u64,
-    max_entries: usize,
+    pub ttl_secs: u64,
+    pub max_entries: usize,
 }
 
 impl ResponseCache {
+    #[allow(dead_code)]
     pub fn new() -> Self {
         Self::with_limits(3600, 1000)
     }
@@ -41,8 +42,13 @@ impl ResponseCache {
         }
     }
 
+    #[allow(dead_code)]
     pub fn cache_key(messages_json: &str, model: &str) -> String {
-        let input = format!("{}:{}", model, messages_json);
+        Self::cache_key_with_mode(messages_json, model, "full")
+    }
+
+    pub fn cache_key_with_mode(messages_json: &str, model: &str, mode: &str) -> String {
+        let input = format!("{}:{}:{}", mode, model, messages_json);
         blake3::hash(input.as_bytes()).to_hex().to_string()
     }
 
