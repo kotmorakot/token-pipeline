@@ -97,8 +97,14 @@ fn run_command(args: &[String], ultra: bool) {
     let (cmd, cmd_args) = (args[0].as_str(), &args[1..]);
     let full_cmd = args.join(" ");
 
-    let mut command = Command::new(cmd);
-    command.args(cmd_args);
+    // Check if tp has a specific filter, otherwise fallback to rtk
+    let use_rtk = !ultra && !input_filter::is_known_command(cmd);
+
+    let executor = if use_rtk { "rtk" } else { cmd };
+    let exec_args: &[String] = if use_rtk { &args } else { cmd_args };
+
+    let mut command = Command::new(executor);
+    command.args(exec_args);
 
     // Strip tp-hooks from PATH to avoid wrapper recursion
     if let Ok(path) = std::env::var("PATH") {
@@ -117,33 +123,84 @@ fn run_command(args: &[String], ultra: bool) {
             let stderr = String::from_utf8_lossy(&out.stderr).to_string();
             let raw = format!("{}{}", stdout, stderr);
 
-            let filtered = input_filter::apply_with_ultra(&full_cmd, &stdout, &stderr, out.status.code().unwrap_or(-1), ultra);
-
-            print!("{}", filtered);
-
-            let elapsed = start.elapsed();
-            let raw_tokens = estimate_tokens(&raw);
-            let filtered_tokens = estimate_tokens(&filtered);
-
-            stats::record("run", &full_cmd, raw_tokens, filtered_tokens, elapsed.as_millis() as u64);
-
-            let savings = raw.len().saturating_sub(filtered.len());
-            if savings > 10 {
-                let pct = savings as f64 / raw.len() as f64 * 100.0;
+            if use_rtk {
+                // rtk already filtered output, print as-is
+                print!("{}{}", stdout, stderr);
+                let elapsed = start.elapsed();
+                let raw_tokens = estimate_tokens(&raw);
+                stats::record(
+                    "run",
+                    &full_cmd,
+                    raw_tokens,
+                    raw_tokens,
+                    elapsed.as_millis() as u64,
+                );
                 eprintln!(
-                    "\x1b[2m[tp: {} → {} chars ({:.0}% saved) {:.0}ms]\x1b[0m",
+                    "\x1b[2m[tp→rtk: {} chars, {:.0}ms]\x1b[0m",
                     raw.len(),
-                    filtered.len(),
-                    pct,
                     elapsed.as_millis()
                 );
+            } else {
+                // Apply tp's own filter
+                let filtered = input_filter::apply_with_ultra(
+                    &full_cmd,
+                    &stdout,
+                    &stderr,
+                    out.status.code().unwrap_or(-1),
+                    ultra,
+                );
+                print!("{}", filtered);
+                let elapsed = start.elapsed();
+                let raw_tokens = estimate_tokens(&raw);
+                let filtered_tokens = estimate_tokens(&filtered);
+                stats::record(
+                    "run",
+                    &full_cmd,
+                    raw_tokens,
+                    filtered_tokens,
+                    elapsed.as_millis() as u64,
+                );
+                let savings = raw.len().saturating_sub(filtered.len());
+                if savings > 10 {
+                    let pct = savings as f64 / raw.len() as f64 * 100.0;
+                    eprintln!(
+                        "\x1b[2m[tp: {} → {} chars ({:.0}% saved) {:.0}ms]\x1b[0m",
+                        raw.len(),
+                        filtered.len(),
+                        pct,
+                        elapsed.as_millis()
+                    );
+                }
             }
 
             std::process::exit(out.status.code().unwrap_or(0));
         }
         Err(e) => {
-            eprintln!("tp: failed to execute '{}': {}", cmd, e);
-            std::process::exit(127);
+            let name = if use_rtk { "rtk" } else { cmd };
+            eprintln!("tp: failed to execute '{}': {}", name, e);
+            // Last resort: run original command directly
+            if use_rtk {
+                let mut fallback = Command::new(cmd);
+                fallback.args(cmd_args);
+                if let Ok(path) = std::env::var("PATH") {
+                    let clean_path: Vec<&str> = path
+                        .split(':')
+                        .filter(|p| !p.contains("tp-hooks") && !p.contains("token-pipeline"))
+                        .collect();
+                    fallback.env("PATH", clean_path.join(":"));
+                }
+                match fallback.output() {
+                    Ok(out) => {
+                        let so = String::from_utf8_lossy(&out.stdout).to_string();
+                        let se = String::from_utf8_lossy(&out.stderr).to_string();
+                        print!("{}{}", so, se);
+                        std::process::exit(out.status.code().unwrap_or(0));
+                    }
+                    Err(_) => std::process::exit(127),
+                }
+            } else {
+                std::process::exit(127);
+            }
         }
     }
 }

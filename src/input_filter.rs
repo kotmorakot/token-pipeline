@@ -12,6 +12,24 @@ pub fn apply(cmd: &str, stdout: &str, stderr: &str, exit_code: i32) -> String {
     apply_with_ultra(cmd, stdout, stderr, exit_code, false)
 }
 
+/// Check if tp has a specific filter for this command
+/// Returns false for unknown commands → will fall back to rtk
+pub fn is_known_command(cmd: &str) -> bool {
+    matches!(cmd,
+        "git" | "ls" | "dir" | "exa" | "eza" |
+        "cat" | "bat" | "head" | "tail" | "less" | "more" |
+        "cargo" | "npm" | "pnpm" | "yarn" | "bun" |
+        "pytest" | "jest" | "vitest" | "rspec" | "go" |
+        "grep" | "rg" | "ag" | "find" | "fd" |
+        "docker" | "podman" | "kubectl" | "oc" | "helm" |
+        "env" | "printenv" | "curl" | "wget" | "httpie" |
+        "tree" | "ps" | "df" |
+        "make" | "cmake" | "ninja" |
+        "python" | "python3" | "node" | "ruby" | "php" |
+        "gh" | "pip" | "pip3" | "uv" | "tsc" | "npx" | "next"
+    )
+}
+
 pub fn apply_with_ultra(cmd: &str, stdout: &str, stderr: &str, exit_code: i32, ultra: bool) -> String {
     let parts: Vec<&str> = cmd.split_whitespace().collect();
     if parts.is_empty() {

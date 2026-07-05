@@ -27,6 +27,9 @@ const TP_COMMANDS: &[&str] = &[
     "make", "cmake", "ninja",
     "python", "python3", "node", "ruby", "php",
     "gh", "pip", "pip3", "uv", "tsc", "npx", "next",
+    // rtk fallback wrappers
+    "aws", "gcloud", "dotnet", "diff", "log", "summary",
+    "json", "deps", "psql", "terraform", "pulumi", "glab",
 ];
 
 pub fn install_hook(target: &str) {
